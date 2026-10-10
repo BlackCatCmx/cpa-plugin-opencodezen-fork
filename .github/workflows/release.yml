@@ -37,6 +37,7 @@ jobs:
             golang:1.26-bookworm \
             bash -c '
               set -euo pipefail
+              git config --global --add safe.directory /src
               go mod verify
               go vet ./...
               go test ./...
