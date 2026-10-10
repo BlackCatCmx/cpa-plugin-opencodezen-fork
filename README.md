@@ -86,7 +86,7 @@ plugins:
 https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/registry.json
 ```
 
-安装本来源的 OpenCode Zen 后，侧栏会出现 **OpenCode Zen** 页面。先在 CPA 管理登录页勾选“记住登录”，然后在插件页面逐条添加 API Key、代理和服务地址；页面也支持编辑、启停和删除。服务地址默认使用 `https://opencode.ai/zen/v1`。
+安装本来源的 OpenCode Zen 后，侧栏会出现 **OpenCode Zen** 页面。先在 CPA 管理登录页勾选“记住登录”，然后在插件页面逐条添加 API Key、代理和服务地址。列表完整显示每把 Key 与对应代理，支持复制、搜索、状态筛选、编辑、启停和删除；添加和编辑在独立窗口中完成，配色跟随 CPA 主题。服务地址默认使用 `https://opencode.ai/zen/v1`。
 
 每个 Key 对应一份 CPA 凭据，继续由 CPA 调度。代理留空时，聊天和模型发现均使用 CPA 全局代理；填写 `direct` 强制直连；填写 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址则使用该 Key 的独立代理。代理错误会明确失败，不会自动改成直连。
 
