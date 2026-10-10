@@ -1,102 +1,66 @@
-name: Release
-
-# Builds the zen plugin for linux (amd64 + arm64) and publishes a GitHub
-# Release with the exact asset layout:
-#
-#   zen_<version>_<goos>_<goarch>.zip   (zip root contains zen.so)
-#   checksums.txt                        (sha256sum format)
-#
-# Trigger: push a tag like v0.3.0.
+name: Release Linux amd64
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build & Release
+  build:
+    name: Build and release Linux amd64
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { goos: linux,   goarch: amd64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Vet & Test
-        run: |
-          go mod tidy
-          go mod verify
-          go vet ./...
-          go test ./...
-
       - name: Resolve version
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build
-        env:
-          CGO_ENABLED: '1'
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+        id: version
         run: |
-          ext="so"; [ "${GOOS}" = "darwin" ] && ext="dylib"; [ "${GOOS}" = "windows" ] && ext="dll"
-          mkdir -p "dist/${GOOS}_${GOARCH}"
-          go build -trimpath -buildvcs=true -buildmode=c-shared \
-            -ldflags "-s -w -X main.pluginVersion=${{ steps.ver.outputs.version }}" \
-            -o "dist/${GOOS}_${GOARCH}/zen.${ext}" .
-          rm -f "dist/${GOOS}_${GOARCH}/zen.h"
+          base_version="$(jq -r '.plugins[] | select(.id == "zen") | .version' registry.json)"
+          echo "version=${base_version}-build.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      - name: Package zip (store layout)
+      - name: Test and build Linux amd64
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          ext="so"; [ "${GOOS}" = "darwin" ] && ext="dylib"; [ "${GOOS}" = "windows" ] && ext="dll"
-          stage="stage"
-          mkdir -p "${stage}"
-          cp "dist/${GOOS}_${GOARCH}/zen.${ext}" "${stage}/zen.${ext}"
-          ( cd "${stage}" && zip "../zen_${{ steps.ver.outputs.version }}_${GOOS}_${GOARCH}.zip" "zen.${ext}" )
+          mkdir -p dist/linux_amd64
+          docker run --rm \
+            -e CGO_ENABLED=1 \
+            -e GOOS=linux \
+            -e GOARCH=amd64 \
+            -e PLUGIN_VERSION \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -w /src \
+            golang:1.26-bookworm \
+            bash -c '
+              set -euo pipefail
+              go mod verify
+              go vet ./...
+              go test ./...
+              go build -trimpath -buildvcs=true -buildmode=c-shared \
+                -ldflags "-s -w -X main.pluginVersion=${PLUGIN_VERSION}" \
+                -o dist/linux_amd64/zen.so .
+            '
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zen-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            zen_*.zip
-          if-no-files-found: error
+      - name: Package Linux amd64
+        env:
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip -j "dist/zen_${PLUGIN_VERSION}_linux_amd64.zip" dist/linux_amd64/zen.so
+          cd dist
+          sha256sum zen_*.zip > checksums.txt
 
-  publish:
-    name: Publish Release
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums
-        working-directory: dist
-        run: sha256sum zen_*.zip > checksums.txt
-
-      - name: Create GitHub Release
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/zen_*.zip
             dist/checksums.txt
+          fail_on_unmatched_files: true
           generate_release_notes: true

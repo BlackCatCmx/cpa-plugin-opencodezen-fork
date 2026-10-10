@@ -10,3 +10,5 @@ chat_body.json
 *.so
 b*.json
 bt.json
+AGENTS.md
+temp/
