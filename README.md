@@ -78,7 +78,25 @@ plugins:
 > `api-keys` 和 `exclude-models` 也可以在 CPA Web 管理中心的插件配置页直接填写。
 > **注意**：多个 key 之间用逗号（`,`）分隔。0.7.3 之前分号（`;`）分隔会被当成一个拼接的长 key，导致上游 401。
 
-### 2. 添加凭证（二选一）
+### 2. 添加 Key 和独立代理
+
+在 CPA 插件商店的第三方插件源设置中添加：
+
+```text
+https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/registry.json
+```
+
+安装本来源的 OpenCode Zen 后，侧栏会出现 **OpenCode Zen** 页面。先在 CPA 管理登录页勾选“记住登录”，然后在插件页面逐条添加 API Key、代理和服务地址；页面也支持编辑、启停和删除。服务地址默认使用 `https://opencode.ai/zen/v1`。
+
+每个 Key 对应一份 CPA 凭据，继续由 CPA 调度。代理留空时，聊天和模型发现均使用 CPA 全局代理；填写 `direct` 强制直连；填写 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址则使用该 Key 的独立代理。代理错误会明确失败，不会自动改成直连。
+
+设置独立代理时，插件自行发送上游 HTTP 请求，不经过 CPA 的 HTTP 请求日志桥；CPA 仍负责客户端协议转换、凭据调度和结果返回。插件保留原有上游方言转换和 SSE 处理。CPA 的请求完成事件会取消客户端已断开的上游请求。
+
+已有凭据会直接显示在页面中。原来的插件配置 `api-keys` 仍可用于导入 Key，已有凭据不会因重新配置而被覆盖；从面板编辑或删除导入的 Key 时，会同步移除其旧导入配置。
+
+单次非流式响应和单个 SSE 事件的缓冲默认限制为 64 MiB，超限会明确报错并关闭上游连接。可在 `plugins.configs.zen.max-buffer-bytes` 中调整字节数，设为 `0` 关闭限制。流式响应的总长度不受此限制。
+
+也可以继续使用以下方式添加凭据：
 
 **方式 A（推荐）：插件配置 `api-keys`**
 
@@ -93,6 +111,7 @@ plugins:
   "type": "zen",
   "provider": "zen",
   "api_key": "sk-your-zen-api-key-here",
+  "proxy_url": "http://your-proxy:8080",
   "base_url": "https://opencode.ai/zen/v1"
 }
 ```
@@ -146,12 +165,12 @@ plugins:
 Zen 免费层有 IP 风控：同一服务器 IP 高频请求后会返回 `429 FreeUsageLimitError`（Rate limit exceeded）。此时可让 zen 流量走代理：
 
 ```yaml
-# config.yaml 全局代理（插件上游请求经宿主 host.http.do 桥，会使用此设置）
+# config.yaml 全局代理（凭据的 proxy_url 留空时使用）
 proxy-url: "https://your-proxy:443"
 ```
 
 > **重要**：
-> - 插件上游请求走宿主的全局 `proxy-url`；**不支持**在 zen 凭证文件里单独设置 `proxy_url`（宿主对插件 HTTP 桥不传递 per-auth 代理）。
+> - 每把 Key 可在插件页面独立设置代理，也可在凭据 JSON 中填写 `proxy_url`。留空使用全局代理，`direct` 强制直连；聊天和模型发现使用同样的代理策略。
 > - 全局代理会影响所有提供商。如果其他提供商（如国内天翼云）需要直连，可在 `openai-compatibility` 的 `api-key-entries` 里为该条目设置 `proxy-url: direct` 强制直连。
 > - 代理需支持 HTTPS CONNECT（如 Clash/mihomo 的 http 节点 `https://host:443`）。Docker 部署时代理地址不能写 `127.0.0.1`（容器内不可达宿主回环），应写宿主 IP 或 `host.docker.internal`。
 > - 免费代理节点不稳定，可能造成流式响应中断，建议选可靠节点。
@@ -204,6 +223,7 @@ curl -s -N http://localhost:8080/backend-api/codex/responses \
 
 ## 版本历史
 
+- **0.8.0**：新增 OpenCode Zen 侧栏管理页面，支持逐条添加、编辑、启停、删除 Key 及独立代理；聊天、流式请求和模型发现统一使用凭据代理策略。401/403 交给 CPA 调度，不在插件内切换 Key；上游 HTTP 状态码返回 CPA。独立代理请求随客户端断开取消，保留原有协议转换。
 - **0.7.5**：端点路由对齐官方文档 + 跨方言转发加固 + 官方客户端行为对齐：
   - **修复 muse 第二轮起必 400 → auth_unavailable 中断**：responses→responses 直通路径现在剥离重放的 `reasoning` 项（`rs_` id 引用上游不保留的状态）与 `previous_response_id`；此前 pi 等 codex 方言客户端每轮重放 reasoning 项都会 400，连续失败后 CPA 把凭证标记不可用。
   - 端点：内置官方 Zen 端点表快照（按模型家族分类，抗文档变动；`/models` 无端点字段，文档是唯一机器可用来源）。注册与路由优先查表；非 OpenAI 方言模型（claude/gemini/jev/qwen3.7 等）不再被宣告；未显式配置端点时 400/404/405 **双向**换方言重试（此前仅 chat→responses 单向）并记住结果；显式 `endpoint` 配置永远优先。

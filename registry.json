@@ -4,9 +4,9 @@
     {
       "id": "zen",
       "name": "OpenCode Zen",
-      "description": "OpenCode Zen 免费模型提供商，支持 Chat Completions、Responses 和流式响应。",
+      "description": "OpenCode Zen 免费模型提供商，支持独立代理和可视化 Key 管理。",
       "author": "BlackCatCmx / Victor9578",
-      "version": "0.7.6",
+      "version": "0.8.0",
       "repository": "https://github.com/BlackCatCmx/cpa-plugin-opencodezen-fork",
       "tags": ["provider", "opencode", "zen"]
     }

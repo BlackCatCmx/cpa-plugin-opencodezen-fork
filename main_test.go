@@ -79,8 +79,8 @@ func TestRegister(t *testing.T) {
 	if err := json.Unmarshal(env.Result, &reg); err != nil {
 		t.Fatal(err)
 	}
-	if reg.SchemaVersion != abiVersion {
-		t.Fatalf("schema version = %d, want %d", reg.SchemaVersion, abiVersion)
+	if reg.SchemaVersion != 2 {
+		t.Fatalf("schema version = %d, want 2", reg.SchemaVersion)
 	}
 	if !reg.Capabilities.Executor {
 		t.Fatal("want executor capability")
@@ -97,6 +97,7 @@ func TestRegister(t *testing.T) {
 }
 
 func TestConfigureParsesModels(t *testing.T) {
+	mockCredentialHost(t)
 	// The host marshals config_yaml as []byte, which JSON-encodes as base64.
 	raw, _ := json.Marshal(map[string]any{
 		"config_yaml": []byte("provider: zen\napi-keys:\n  - sk-key1\n  - sk-key2\nmodels:\n  - model: mimo-v2.6-flash-free\n    endpoint: chat\n  - model: muse-spark-1.3-contributor-free\n    endpoint: responses\nclient: opencode\n"),
@@ -1556,7 +1557,7 @@ func TestFetchZenModelsFiltersFreeTier(t *testing.T) {
 		fmt.Fprint(w, `{"object":"list","data":[{"id":"mimo-v2.6-flash-free"},{"id":"claude-opus-5"},{"id":"muse-spark-1.3-contributor-free"}]}`)
 	}))
 	defer srv.Close()
-	ids, err := fetchZenModels(srv.URL, "k1")
+	ids, err := fetchZenModels(srv.URL, "k1", "direct")
 	if err != nil {
 		t.Fatalf("fetchZenModels: %v", err)
 	}
@@ -1639,6 +1640,7 @@ func TestModelRegistrationExcludesConfiguredModels(t *testing.T) {
 }
 
 func TestConfigureParsesExcludeModelsCommaString(t *testing.T) {
+	mockCredentialHost(t)
 	payload, err := json.Marshal(struct {
 		ConfigYAML []byte `json:"config_yaml"`
 	}{[]byte("exclude-models: \"jev-1.13-free, space-bunny-free\"\napi-keys: k1,k2\n")})
@@ -1659,6 +1661,7 @@ func TestConfigureParsesExcludeModelsCommaString(t *testing.T) {
 }
 
 func TestConfigureParsesSemicolonSeparatedKeys(t *testing.T) {
+	mockCredentialHost(t)
 	// Regression: management-center users entered "key1;key2" and the plugin
 	// treated the whole string as one key, producing an invalid credential.
 	payload, err := json.Marshal(struct {

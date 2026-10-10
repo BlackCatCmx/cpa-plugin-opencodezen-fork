@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCode Zen</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; --bg: #f6f7f9; --card: #fff; --text: #20242b; --muted: #69717f; --border: #dce1e8; --accent: #6257da; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #11151c; --card: #1b212c; --text: #e9edf4; --muted: #a2abbb; --border: #354052; } }
+    * { box-sizing: border-box; } body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+    main { max-width: 1050px; margin: auto; } h1 { font-size: 24px; margin: 0; } h2 { font-size: 18px; margin-top: 0; }
+    header, .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; }
+    p, .muted { color: var(--muted); font-size: 14px; } section, article { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-top: 16px; }
+    form { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; } label { display: grid; gap: 8px; font-size: 14px; } .wide { grid-column: 1 / -1; }
+    input, button { font: inherit; border: 1px solid var(--border); border-radius: 7px; padding: 10px 12px; background: var(--card); color: var(--text); }
+    button { cursor: pointer; } button.primary { background: var(--accent); color: white; border-color: var(--accent); } button:disabled { opacity: .5; cursor: wait; }
+    #message { white-space: pre-wrap; overflow-wrap: anywhere; color: #c13c43; } article h3 { margin: 0 0 8px; font-size: 16px; overflow-wrap: anywhere; } article p { overflow-wrap: anywhere; }
+    @media (max-width: 600px) { body { padding: 12px; } form { grid-template-columns: 1fr; } section, article { padding: 16px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>OpenCode Zen</h1><button id="refresh" type="button">刷新列表</button></header>
+  <p>每个 Key 可设置独立代理。留空使用 CPA 全局代理；填写 direct 强制直连。</p>
+  <div id="message" role="alert"></div>
+  <section>
+    <h2 id="form-title">添加 Key</h2>
+    <form id="key-form">
+      <label class="wide">API Key<input id="api-key" type="password" autocomplete="off" required placeholder="oc_sk_…"></label>
+      <label>代理地址<input id="proxy-url" autocomplete="off" placeholder="http://代理地址:端口 或 direct"></label>
+      <label>服务地址<input id="base-url" type="url" required value="https://opencode.ai/zen/v1"></label>
+      <div class="actions wide"><button id="save" class="primary" type="submit">保存</button><button id="cancel" type="button" hidden>取消编辑</button></div>
+    </form>
+  </section>
+  <div id="accounts" aria-live="polite"></div>
+</main>
+<script type="module" src="./panel.mjs"></script>
+</body>
+</html>

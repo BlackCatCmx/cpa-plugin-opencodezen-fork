@@ -55,12 +55,11 @@ import "C"
 
 import (
 	"bytes"
-	"crypto/rand"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -91,7 +90,7 @@ const (
 	defaultUserAgent = "opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 )
 
-var pluginVersion = "0.7.3"
+var pluginVersion = "0.8.0"
 
 var (
 	canonicalSessionRe = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
@@ -138,23 +137,25 @@ func (m modelRoute) EndpointPath() string {
 }
 
 type pluginConfig struct {
-	Enabled       bool
-	Provider      string
-	BaseURL       string
-	APIKeys       []string
-	ExcludeModels []string
-	Client        string
-	Project       string
-	Models        []modelRoute
+	Enabled        bool
+	Provider       string
+	BaseURL        string
+	APIKeys        []string
+	ExcludeModels  []string
+	Client         string
+	Project        string
+	Models         []modelRoute
+	MaxBufferBytes int64
 }
 
 func defaultPluginConfig() pluginConfig {
 	return pluginConfig{
-		Enabled:  true,
-		Provider: pluginProvider,
-		BaseURL:  zenBaseURL,
-		Client:   "cli",
-		Project:  "global",
+		Enabled:        true,
+		Provider:       pluginProvider,
+		BaseURL:        zenBaseURL,
+		Client:         "cli",
+		Project:        "global",
+		MaxBufferBytes: 64 << 20,
 	}
 }
 
@@ -190,6 +191,13 @@ func configure(raw []byte) error {
 				return err
 			}
 			applyConfigNode(&cfg, node)
+			if value, exists := node["max-buffer-bytes"]; exists {
+				limit, ok := value.(int)
+				if !ok || limit < 0 {
+					return fmt.Errorf("max-buffer-bytes must be a non-negative integer")
+				}
+				cfg.MaxBufferBytes = int64(limit)
+			}
 		}
 	}
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
@@ -220,8 +228,10 @@ func configure(raw []byte) error {
 			m.Alias = m.Model
 		}
 	}
+	if err := persistVirtualAuths(cfg); err != nil {
+		return err
+	}
 	storeConfig(cfg)
-	persistVirtualAuths(cfg)
 	return nil
 }
 
@@ -231,26 +241,47 @@ func configure(raw []byte) error {
 // auth.parse payload carries RawJSON, not StorageJSON), so virtual keys
 // configured through the management center must be written to disk to
 // become selectable credentials.
-func persistVirtualAuths(cfg pluginConfig) {
+var credentialHost = callHost
+
+func persistVirtualAuths(cfg pluginConfig) error {
 	if !cfg.Enabled || len(cfg.APIKeys) == 0 {
-		return
+		return nil
+	}
+	raw, err := credentialHost("host.auth.list", struct{}{})
+	if err != nil {
+		return fmt.Errorf("list Zen credentials: %w", err)
+	}
+	var listed struct {
+		Files []struct{ Name string } `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for _, file := range listed.Files {
+		existing[file.Name] = true
 	}
 	for _, key := range cfg.APIKeys {
 		id := sha256Prefix(key)
 		name := fmt.Sprintf("%s-%s.json", cfg.Provider, id)
+		if existing[name] {
+			continue
+		}
 		payload, _ := json.Marshal(map[string]string{
 			"type":     cfg.Provider,
 			"provider": cfg.Provider,
 			"api_key":  key,
 			"base_url": cfg.BaseURL,
 		})
-		// Best effort: failures are logged by the host; the auth.parse
-		// fallback still returns virtual auths for hosts that support it.
-		_, _ = callHost("host.auth.save", map[string]any{
+		_, err := credentialHost("host.auth.save", map[string]any{
 			"Name": name,
 			"JSON": json.RawMessage(payload),
 		})
+		if err != nil {
+			return fmt.Errorf("save Zen credential %s: %w", name, err)
+		}
 	}
+	return nil
 }
 
 func trimNonEmpty(in []string) []string {
@@ -603,8 +634,9 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type registration struct {
@@ -623,12 +655,15 @@ type metadata struct {
 }
 
 type capabilities struct {
-	Executor              bool     `json:"executor"`
-	ExecutorModelScope    string   `json:"executor_model_scope"`
-	ExecutorInputFormats  []string `json:"executor_input_formats"`
-	ExecutorOutputFormats []string `json:"executor_output_formats"`
-	ModelRegistrar        bool     `json:"model_registrar"`
-	AuthProvider          bool     `json:"auth_provider"`
+	Executor               bool     `json:"executor"`
+	ExecutorModelScope     string   `json:"executor_model_scope"`
+	ExecutorInputFormats   []string `json:"executor_input_formats"`
+	ExecutorOutputFormats  []string `json:"executor_output_formats"`
+	ModelRegistrar         bool     `json:"model_registrar"`
+	AuthProvider           bool     `json:"auth_provider"`
+	ManagementAPI          bool     `json:"management_api"`
+	RequestInterceptor     bool     `json:"request_interceptor"`
+	RequestLifecyclePlugin bool     `json:"request_lifecycle_plugin"`
 }
 
 type modelInfo struct {
@@ -769,7 +804,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {}
+func cliproxyPluginShutdown() { cancelExecutions() }
 
 // ---------------------------------------------------------------------------
 // method dispatch
@@ -778,7 +813,12 @@ func cliproxyPluginShutdown() {}
 func processPluginCall(method string, payload []byte) ([]byte, int) {
 	raw, errHandle := handleMethod(method, payload)
 	if errHandle != nil {
-		return errorEnvelope("plugin_error", errHandle.Error()), 1
+		status := 0
+		if upstream, ok := errHandle.(*upstreamError); ok {
+			status = upstream.status
+		}
+		raw, _ := json.Marshal(envelope{Error: &envelopeError{Code: "plugin_error", Message: errHandle.Error(), HTTPStatus: status}})
+		return raw, 1
 	}
 	return raw, 0
 }
@@ -790,7 +830,7 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 			return nil, err
 		}
 		return okEnvelopeJSON(registration{
-			SchemaVersion: abiVersion,
+			SchemaVersion: 2,
 			Metadata: metadata{
 				Name:             pluginID,
 				Version:          pluginVersion,
@@ -801,15 +841,19 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 					map[string]any{"Name": "enabled", "Type": "boolean", "Description": "Enable the zen provider plugin."},
 					map[string]any{"Name": "api-keys", "Type": "string", "Description": "OpenCode zen API keys (comma-separated). Each key becomes a virtual zen credential; alternatively drop key files into the auth directory."},
 					map[string]any{"Name": "exclude-models", "Type": "string", "Description": "Model IDs (comma-separated) to exclude from the models auto-discovered from the zen /models endpoint."},
+					map[string]any{"Name": "max-buffer-bytes", "Type": "integer", "Description": "Maximum buffered non-stream response or SSE event in bytes; default 67108864 (64 MiB), 0 disables the limit."},
 				},
 			},
 			Capabilities: capabilities{
-				Executor:              true,
-				ExecutorModelScope:    "both",
-				ExecutorInputFormats:  []string{"chat-completions", "responses"},
-				ExecutorOutputFormats: []string{"chat-completions"},
-				ModelRegistrar:        true,
-				AuthProvider:          true,
+				Executor:               true,
+				ExecutorModelScope:     "both",
+				ExecutorInputFormats:   []string{"chat-completions", "responses"},
+				ExecutorOutputFormats:  []string{"chat-completions"},
+				ModelRegistrar:         true,
+				AuthProvider:           true,
+				ManagementAPI:          true,
+				RequestInterceptor:     true,
+				RequestLifecyclePlugin: true,
 			},
 		})
 	case "executor.identifier", "auth.identifier":
@@ -824,6 +868,19 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 		return execute(payload, true)
 	case "executor.count_tokens":
 		return okEnvelopeJSON(executorResponse{Payload: []byte(`{"total_tokens":0}`)})
+	case "management.register":
+		return panelRegistration()
+	case "management.handle":
+		return handlePanel(payload)
+	case "request.intercept_before":
+		return okEnvelopeJSON(struct{}{})
+	case "request.intercept_after":
+		return trackExecution(payload)
+	case "request.complete":
+		return completeExecution(payload)
+	case "plugin.quiesce", "plugin.shutdown":
+		cancelExecutions()
+		return okEnvelopeJSON(struct{}{})
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -884,8 +941,11 @@ func authParse(payload []byte) ([]byte, error) {
 				if isZen && key != "" {
 					// Remember the key so model discovery can query /models, and
 					// refresh the discovered free-tier list in the background.
-					rememberAuthKey(key)
-					go refreshDiscoveredModels(authBaseURL(stored, cfg), key)
+					proxyURL, _ := stored["proxy_url"].(string)
+					disabled, _ := stored["disabled"].(bool)
+					if !disabled {
+						go refreshDiscoveredModels(authBaseURL(stored, cfg), key, proxyURL)
+					}
 					id := sha256Prefix(key)
 					fileName := req.FileName
 					if fileName == "" {
@@ -903,6 +963,8 @@ func authParse(payload []byte) ([]byte, error) {
 							ID:          authID,
 							FileName:    fileName,
 							Label:       authLabel(cfg.Provider, id),
+							ProxyURL:    proxyURL,
+							Disabled:    disabled,
 							StorageJSON: raw,
 							Models:      modelsList,
 							Metadata:    map[string]any{"type": cfg.Provider},
@@ -1088,39 +1150,6 @@ var discoveredModels struct {
 	fetchedAt time.Time
 }
 
-// seenAuthKeys accumulates zen API keys observed by auth.parse; discovery
-// needs one to query /models.
-var seenAuthKeys struct {
-	mu   sync.Mutex
-	keys []string
-}
-
-func rememberAuthKey(key string) {
-	if strings.TrimSpace(key) == "" {
-		return
-	}
-	seenAuthKeys.mu.Lock()
-	defer seenAuthKeys.mu.Unlock()
-	for _, k := range seenAuthKeys.keys {
-		if k == key {
-			return
-		}
-	}
-	seenAuthKeys.keys = append(seenAuthKeys.keys, key)
-}
-
-func anyKnownKey(cfg pluginConfig) string {
-	if len(cfg.APIKeys) > 0 {
-		return cfg.APIKeys[0]
-	}
-	seenAuthKeys.mu.Lock()
-	defer seenAuthKeys.mu.Unlock()
-	if len(seenAuthKeys.keys) > 0 {
-		return seenAuthKeys.keys[0]
-	}
-	return ""
-}
-
 // authBaseURL picks the base URL for discovery: the auth file's custom
 // service address if present, else plugin config, else the zen default.
 func authBaseURL(stored map[string]any, cfg pluginConfig) string {
@@ -1138,26 +1167,35 @@ func authBaseURL(stored map[string]any, cfg pluginConfig) string {
 }
 
 // fetchZenModels lists free-tier model IDs from the zen /models endpoint.
-// ponytail: plain http.Client instead of host.http.do — model.register has no
-// host callback context; add host-routed discovery if proxy support matters.
-func fetchZenModels(baseURL, apiKey string) ([]string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/models", nil)
+// Discovery uses the same credential proxy policy as execution.
+func fetchZenModels(baseURL, apiKey, proxyURL string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	handle, err := openUpstream(ctx, "", proxyURL, http.MethodGet, baseURL+"/models", nil, apiKey, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	defer handle.close()
+	var buffer bytes.Buffer
+	for {
+		chunk, err := handle.read()
+		if err != nil {
+			return nil, err
+		}
+		if chunk.Error != "" {
+			return nil, fmt.Errorf("zen model discovery: %s", chunk.Error)
+		}
+		if buffer.Len()+len(chunk.Payload) > 1<<20 {
+			return nil, fmt.Errorf("zen model discovery response exceeds 1 MiB")
+		}
+		buffer.Write(chunk.Payload)
+		if chunk.Done {
+			break
+		}
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("zen /models status %d: %s", resp.StatusCode, truncate(body, 256))
+	body, status := buffer.Bytes(), handle.StatusCode
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("zen /models status %d: %s", status, truncate(body, 256))
 	}
 	var list struct {
 		Data []struct {
@@ -1177,9 +1215,10 @@ func fetchZenModels(baseURL, apiKey string) ([]string, error) {
 }
 
 // refreshDiscoveredModels updates the discovery cache (best effort).
-func refreshDiscoveredModels(baseURL, apiKey string) {
-	ids, err := fetchZenModels(baseURL, apiKey)
+func refreshDiscoveredModels(baseURL, apiKey, proxyURL string) {
+	ids, err := fetchZenModels(baseURL, apiKey, proxyURL)
 	if err != nil {
+		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": strings.ReplaceAll(err.Error(), apiKey, "[redacted]")}})
 		return
 	}
 	discoveredModels.mu.Lock()
@@ -1197,15 +1236,43 @@ func discoveredZenModels(cfg pluginConfig) []string {
 	if fresh {
 		return ids
 	}
-	key := anyKnownKey(cfg)
-	if key == "" {
+	raw, err := callHost("host.auth.list", struct{}{})
+	if err != nil {
 		return ids
 	}
-	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		baseURL = zenBaseURL
+	var listed struct {
+		Files []struct {
+			Provider  string
+			Disabled  bool
+			AuthIndex string `json:"auth_index"`
+		} `json:"files"`
 	}
-	refreshDiscoveredModels(baseURL, key)
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		return ids
+	}
+	for _, file := range listed.Files {
+		if file.Provider != cfg.Provider || file.Disabled {
+			continue
+		}
+		raw, err := callHost("host.auth.get", map[string]string{"auth_index": file.AuthIndex})
+		if err != nil {
+			continue
+		}
+		var saved struct {
+			JSON map[string]any `json:"json"`
+		}
+		if err := json.Unmarshal(raw, &saved); err != nil {
+			continue
+		}
+		key := extractAPIKey(saved.JSON)
+		if key == "" {
+			continue
+		}
+		proxyURL, _ := saved.JSON["proxy_url"].(string)
+		refreshDiscoveredModels(authBaseURL(saved.JSON, cfg), key, proxyURL)
+		break
+	}
+
 	discoveredModels.mu.RLock()
 	defer discoveredModels.mu.RUnlock()
 	return discoveredModels.ids
@@ -1344,7 +1411,15 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	if streamID == "" {
 		return nil, fmt.Errorf("stream_id is required for executor.execute_stream")
 	}
-	go runStream(req, cfg, route, baseURL, headers, apiKey, streamID)
+	ctx, err := executionContext(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, usedRoute, err := selectUpstream(ctx, req, cfg, route, baseURL, headers, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	go runStream(ctx, req, usedRoute, resp, streamID)
 	return okEnvelopeJSON(executorStreamResponse{
 		Headers: map[string][]string{"Content-Type": {"text/event-stream"}},
 	})
@@ -1355,9 +1430,12 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 // (400/404/405) on the first candidate dialect is retried once against the
 // opposite endpoint and the winner is remembered.
 func executeNonStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL string, headers map[string][]string, apiKey string) ([]byte, error) {
+	ctx, err := executionContext(req)
+	if err != nil {
+		return nil, err
+	}
 	endpoints := candidateEndpoints(cfg, route)
 	var lastErr error
-	authRetry := false
 	run := func(key string, hdrs map[string][]string) ([]byte, error) {
 		for _, ep := range endpoints {
 			r := route
@@ -1368,19 +1446,15 @@ func executeNonStream(req executorRequest, cfg pluginConfig, route modelRoute, b
 			if err != nil {
 				return nil, err
 			}
-			body, respHeaders, status, err := doUpstream(req.HostCallbackID, http.MethodPost, baseURL+r.EndpointPath(), hdrs, key, upstreamBody)
+			body, respHeaders, status, err := requestUpstream(ctx, req.HostCallbackID, proxyForRequest(req), http.MethodPost, baseURL+r.EndpointPath(), hdrs, key, upstreamBody)
 			if err != nil {
 				return nil, err
 			}
 			if status < 200 || status >= 300 {
-				lastErr = fmt.Errorf("zen upstream status %d: %s", status, truncate(body, 512))
+				lastErr = &upstreamError{status: status, message: truncate(body, 512)}
 				if isEndpointMismatch(status) && ep == endpoints[0] && len(endpoints) > 1 {
 					continue // model may only be served on the other endpoint
 				}
-				// Auth-level failures (401 credits/auth, 403 region/policy):
-				// retried once by the caller with a rotated key and a fresh
-				// session.
-				authRetry = status == 401 || status == 403
 				return nil, lastErr
 			}
 			if ep != endpoints[0] {
@@ -1403,13 +1477,7 @@ func executeNonStream(req executorRequest, cfg pluginConfig, route modelRoute, b
 		}
 		return nil, lastErr
 	}
-	out, err := run(apiKey, headers)
-	if err != nil && authRetry {
-		apiKey = nextAPIKey(cfg)
-		refreshGateSession(headers)
-		out, err = run(apiKey, headers)
-	}
-	return out, err
+	return run(apiKey, headers)
 }
 
 // baseURLForRequest resolves the upstream base URL. It checks the host-selected
@@ -1460,7 +1528,7 @@ func apiKeyForRequest(req executorRequest, cfg pluginConfig) string {
 
 // runStream performs the upstream call and forwards SSE frames through the
 // host stream bridge until done, then closes the plugin stream.
-func runStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL string, headers map[string][]string, apiKey string, streamID string) {
+func runStream(ctx context.Context, req executorRequest, route modelRoute, resp *hostStreamHandle, streamID string) {
 	closeStream := func(errMsg string) {
 		_, _ = callHost("host.stream.close", map[string]any{"stream_id": streamID, "error": strings.TrimSpace(errMsg)})
 	}
@@ -1469,87 +1537,7 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL 
 			closeStream(fmt.Sprintf("zen stream panic: %v", recovered))
 		}
 	}()
-
-	// Endpoint auto-detection: without an explicitly configured endpoint, a
-	// path-level failure (400/404/405) from the first candidate is retried
-	// once against the opposite dialect and the winner is remembered.
-	endpoints := candidateEndpoints(cfg, route)
-	selectUpstream := func(key string, hdrs map[string][]string) (*hostStreamHandle, string, string) {
-		var handle *hostStreamHandle
-		used := ""
-		for _, ep := range endpoints {
-			r := route
-			r.Endpoint = ep
-			// Gate rule 4: zen only answers streaming requests.
-			body, err := prepareUpstreamBody(req, r)
-			if err != nil {
-				return nil, "", err.Error()
-			}
-			h, err := doUpstreamStream(req.HostCallbackID, http.MethodPost, baseURL+r.EndpointPath(), hdrs, key, body)
-			if err != nil {
-				return nil, "", err.Error()
-			}
-			handle = h
-			used = ep
-			if isEndpointMismatch(h.StatusCode) && ep == endpoints[0] && len(endpoints) > 1 {
-				// Drain the error body so the abandoned host stream is reaped.
-				for i := 0; i < 8; i++ {
-					chunk, errRead := readHostStream(h.StreamID)
-					if errRead != nil || chunk.Done || chunk.Error != "" {
-						break
-					}
-				}
-				continue
-			}
-			break
-		}
-		return handle, used, ""
-	}
-	resp, usedEndpoint, errMsg := selectUpstream(apiKey, headers)
-	if errMsg != "" {
-		closeStream(errMsg)
-		return
-	}
-	if resp == nil {
-		closeStream("zen upstream: no endpoint attempted")
-		return
-	}
-	if usedEndpoint != endpoints[0] {
-		rememberEndpoint(route.Model, usedEndpoint)
-	}
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		// Auth-level failure (401 credits/auth, 403 region/policy): rotate
-		// the key and mint a fresh session, then retry once.
-		for i := 0; i < 8; i++ {
-			chunk, errRead := readHostStream(resp.StreamID)
-			if errRead != nil || chunk.Done || chunk.Error != "" {
-				break
-			}
-		}
-		apiKey = nextAPIKey(cfg)
-		refreshGateSession(headers)
-		resp, usedEndpoint, errMsg = selectUpstream(apiKey, headers)
-		if errMsg != "" {
-			closeStream(errMsg)
-			return
-		}
-		if resp == nil {
-			closeStream("zen upstream: no endpoint attempted")
-			return
-		}
-		if usedEndpoint != endpoints[0] {
-			rememberEndpoint(route.Model, usedEndpoint)
-		}
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain a bit of the error body for the message, then close.
-		errBody := ""
-		if chunk, errRead := readHostStream(resp.StreamID); errRead == nil && len(chunk.Payload) > 0 {
-			errBody = truncate(chunk.Payload, 512)
-		}
-		closeStream(fmt.Sprintf("zen upstream status %d: %s", resp.StatusCode, errBody))
-		return
-	}
+	defer resp.close()
 
 	// Chat-completions clients (SourceFormat "openai" / "chat-completions") get
 	// their SSE framing applied by the host itself: when outputFormat equals the
@@ -1594,8 +1582,9 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL 
 	}
 
 	reassembler := &sseReassembler{
-		rawData: rawData,
-		emit:    emit,
+		rawData:        rawData,
+		emit:           emit,
+		maxBufferBytes: loadedConfig().MaxBufferBytes,
 	}
 
 	// Read the upstream in a goroutine so the forwarding loop can also watch
@@ -1614,7 +1603,7 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL 
 	go func() {
 		defer close(chunks)
 		for {
-			chunk, err := readHostStream(resp.StreamID)
+			chunk, err := resp.read()
 			if err != nil {
 				select {
 				case chunks <- upstreamChunk{err: err}:
@@ -1638,6 +1627,9 @@ func runStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL 
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			closeStream(ctx.Err().Error())
+			return
 		case sc, ok := <-chunks:
 			if !ok {
 				// The reader ended without delivering a terminal chunk; treat
@@ -2851,43 +2843,6 @@ func clampMaxOutput(root map[string]any, model string) {
 	}
 }
 
-// officialIDAlphabet is the Base62 alphabet used by the OpenCode client's
-// Identifier ids.
-const officialIDAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-// newOfficialSessionID mints a session id in the official descending
-// format (ses_ + 12 hex chars of the bitwise-inverted millisecond timestamp
-// + 14 base62 chars), so the id decodes as freshly created. Used when a
-// retry needs a session the upstream has never seen.
-func newOfficialSessionID() string {
-	combined := uint64(time.Now().UnixMilli())<<12 | uint64(time.Now().UnixNano()&0xfff)
-	inverted := ^combined
-	const hexDigits = "0123456789abcdef"
-	var hexPart [12]byte
-	for i := 0; i < 6; i++ {
-		b := byte((inverted >> (40 - 8*i)) & 0xff)
-		hexPart[i*2] = hexDigits[b>>4]
-		hexPart[i*2+1] = hexDigits[b&0xf]
-	}
-	randBuf := make([]byte, 14)
-	_, _ = rand.Read(randBuf)
-	var suffix [14]byte
-	for i, b := range randBuf {
-		suffix[i] = officialIDAlphabet[int(b)%len(officialIDAlphabet)]
-	}
-	return "ses_" + string(hexPart[:]) + string(suffix[:])
-}
-
-// refreshGateSession replaces the session headers with a freshly minted
-// official id; used when retrying after auth-level failures.
-func refreshGateSession(headers map[string][]string) string {
-	session := newOfficialSessionID()
-	headers[targetSessionHeader] = []string{session}
-	headers["X-Session-Affinity"] = []string{session}
-	headers["X-Session-Id"] = []string{session}
-	return session
-}
-
 // firstUserText extracts the first user message text for the content-derived
 // session fallback. Understands both chat and responses payloads.
 func firstUserText(body []byte) string {
@@ -3014,12 +2969,6 @@ func normalizeSessionID(value string) (string, bool) {
 // host callbacks (HTTP + stream bridge)
 // ---------------------------------------------------------------------------
 
-type hostHTTPResponse struct {
-	StatusCode int                 `json:"StatusCode"`
-	Headers    map[string][]string `json:"Headers"`
-	Body       []byte              `json:"Body"`
-}
-
 type hostHTTPStreamResponse struct {
 	StatusCode int                 `json:"status_code"`
 	Headers    map[string][]string `json:"headers,omitempty"`
@@ -3086,37 +3035,18 @@ func nextAPIKey(cfg pluginConfig) string {
 	return key
 }
 
-// doUpstream performs a blocking host HTTP call.
-func doUpstream(hostCallbackID, method, url string, headers map[string][]string, apiKey string, body []byte) ([]byte, map[string][]string, int, error) {
-	req := map[string]any{
-		"Method":  method,
-		"URL":     url,
-		"Headers": withAuth(headers, apiKey),
-		"Body":    body,
-	}
-	if hostCallbackID != "" {
-		req["host_callback_id"] = hostCallbackID
-	}
-	raw, err := callHost("host.http.do", req)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	var resp hostHTTPResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, nil, 0, err
-	}
-	return resp.Body, resp.Headers, resp.StatusCode, nil
-}
-
 // hostStreamHandle is an opened host HTTP stream.
 type hostStreamHandle struct {
-	StatusCode int
-	Headers    map[string][]string
-	StreamID   string
+	StatusCode  int
+	Headers     map[string][]string
+	StreamID    string
+	response    *http.Response
+	transport   *http.Transport
+	stopContext func()
 }
 
 // doUpstreamStream opens a host HTTP stream and returns immediately.
-func doUpstreamStream(hostCallbackID, method, url string, headers map[string][]string, apiKey string, body []byte) (*hostStreamHandle, error) {
+func doUpstreamStream(ctx context.Context, hostCallbackID, method, url string, headers map[string][]string, apiKey string, body []byte) (*hostStreamHandle, error) {
 	req := map[string]any{
 		"Method":  method,
 		"URL":     url,
@@ -3126,21 +3056,29 @@ func doUpstreamStream(hostCallbackID, method, url string, headers map[string][]s
 	if hostCallbackID != "" {
 		req["host_callback_id"] = hostCallbackID
 	}
+	stop, err := bindHostHTTPContext(ctx, hostCallbackID, req)
+	if err != nil {
+		return nil, err
+	}
 	raw, err := callHost("host.http.do_stream", req)
 	if err != nil {
+		stop()
 		return nil, err
 	}
 	var resp hostHTTPStreamResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
+		stop()
 		return nil, err
 	}
 	if resp.StreamID == "" {
+		stop()
 		return nil, fmt.Errorf("host http stream bridge is unavailable")
 	}
 	return &hostStreamHandle{
-		StatusCode: resp.StatusCode,
-		Headers:    resp.Headers,
-		StreamID:   resp.StreamID,
+		StatusCode:  resp.StatusCode,
+		Headers:     resp.Headers,
+		StreamID:    resp.StreamID,
+		stopContext: stop,
 	}, nil
 }
 
@@ -3183,28 +3121,36 @@ func emitStreamFrame(streamID string, frame []byte) error {
 // emitting, so a payload split across several data lines reaches the
 // client as one frame instead of invalid fragments.
 type sseReassembler struct {
-	rawData bool
-	lineBuf bytes.Buffer
-	pending []string // data payloads of the event currently being assembled
-	emit    func(frame []byte) error
+	rawData        bool
+	lineBuf        bytes.Buffer
+	pending        strings.Builder // data payloads of the event currently being assembled
+	emit           func(frame []byte) error
+	maxBufferBytes int64
 }
 
 // write feeds one upstream chunk into the reassembler.
 func (r *sseReassembler) write(p []byte) error {
-	r.lineBuf.Write(p)
-	for {
-		data := r.lineBuf.Bytes()
-		idx := bytes.IndexByte(data, '\n')
-		if idx < 0 {
+	for len(p) > 0 {
+		idx := bytes.IndexByte(p, '\n')
+		complete := idx >= 0
+		if !complete {
+			idx = len(p)
+		}
+		if r.maxBufferBytes > 0 && int64(r.lineBuf.Len()+idx+r.pending.Len()) > r.maxBufferBytes {
+			return fmt.Errorf("zen SSE event exceeds max-buffer-bytes (%d)", r.maxBufferBytes)
+		}
+		r.lineBuf.Write(p[:idx])
+		if !complete {
 			return nil
 		}
-		line := make([]byte, idx)
-		copy(line, data[:idx])
-		r.lineBuf.Next(idx + 1)
+		line := append([]byte(nil), r.lineBuf.Bytes()...)
+		r.lineBuf.Reset()
 		if err := r.handleLine(line); err != nil {
 			return err
 		}
+		p = p[idx+1:]
 	}
+	return nil
 }
 
 // flush emits any buffered partial line and the pending event. It must be
@@ -3234,7 +3180,10 @@ func (r *sseReassembler) handleLine(line []byte) error {
 		if payload == "" || strings.HasPrefix(payload, ":") {
 			return nil
 		}
-		r.pending = append(r.pending, payload)
+		if r.pending.Len() > 0 {
+			r.pending.WriteByte('\n')
+		}
+		r.pending.WriteString(payload)
 		return nil
 	}
 	// Non-data lines flush the pending event first to preserve ordering,
@@ -3255,11 +3204,11 @@ func (r *sseReassembler) handleLine(line []byte) error {
 // after the plugin stream closes, so forwarding the upstream terminator
 // would duplicate it.
 func (r *sseReassembler) flushPending() error {
-	if len(r.pending) == 0 {
+	if r.pending.Len() == 0 {
 		return nil
 	}
-	joined := strings.Join(r.pending, "\n")
-	r.pending = nil
+	joined := r.pending.String()
+	r.pending.Reset()
 	if isDoneTerminator(joined) {
 		return nil
 	}

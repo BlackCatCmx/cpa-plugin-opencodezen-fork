@@ -7,10 +7,8 @@ package main
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // =========================================================================
@@ -733,54 +731,5 @@ func TestEnsureGateToolsToollessRequest(t *testing.T) {
 	ensureGateTools(root, "chat")
 	if _, exists := root["tool_choice"]; exists {
 		t.Fatalf("tool_choice must not be injected when the client sent tools: %v", root["tool_choice"])
-	}
-}
-
-// =========================================================================
-// official session id minting
-// =========================================================================
-
-func TestNewOfficialSessionID(t *testing.T) {
-	id := newOfficialSessionID()
-	if !canonicalSessionRe.MatchString(id) {
-		t.Fatalf("id %q does not match the official shape", id)
-	}
-	// The descending timestamp must decode to roughly now. The official
-	// format keeps a 36-bit millisecond timestamp (wraps every ~2.18 years),
-	// so decoding resolves the wraparound against the current time.
-	inverted, err := strconv.ParseUint(id[4:16], 16, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	combined := ^inverted & 0xFFFFFFFFFFFF
-	ts36 := int64(combined >> 12)
-	const mod36 = int64(1) << 36
-	now := time.Now().UnixMilli()
-	candidate := now - now%mod36 + ts36
-	if candidate > now+mod36/2 {
-		candidate -= mod36
-	} else if candidate < now-mod36/2 {
-		candidate += mod36
-	}
-	if delta := now - candidate; delta < -time.Minute.Milliseconds() || delta > time.Minute.Milliseconds() {
-		t.Fatalf("session id timestamp decodes to %dms from now", delta)
-	}
-	// Two ids differ (random suffix).
-	if newOfficialSessionID() == id {
-		t.Fatal("session ids must be unique")
-	}
-}
-
-func TestRefreshGateSession(t *testing.T) {
-	headers := map[string][]string{
-		targetSessionHeader: {"ses_old"},
-	}
-	refreshGateSession(headers)
-	session := headers[targetSessionHeader][0]
-	if !canonicalSessionRe.MatchString(session) || session == "ses_old" {
-		t.Fatalf("refreshGateSession left %q", session)
-	}
-	if headers["X-Session-Affinity"][0] != session || headers["X-Session-Id"][0] != session {
-		t.Fatalf("affinity headers not aligned: %v", headers)
 	}
 }
