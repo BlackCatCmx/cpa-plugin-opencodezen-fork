@@ -3,11 +3,14 @@ const defaultBase = 'https://opencode.ai/zen/v1';
 let session;
 let provider = 'zen';
 let globalProxy = '';
+let modelPrefix = 'opencode';
+let baseURL = defaultBase;
 let editing = null;
 let deleting = null;
 let accounts = [];
 let pending = false;
 let loaded = false;
+const testResults = new Map();
 
 function readSession() {
   let raw = localStorage.getItem('cli-proxy-auth');
@@ -52,7 +55,10 @@ function validateProxy(value) {
 }
 
 function accountKey(account) { return String(account.stored.api_key || account.stored.key || ''); }
-function accountBase(account) { return account.stored.base_url || account.stored.url || defaultBase; }
+function maskedKey(key) {
+  const start = Math.min(8, Math.floor(key.length / 3)), end = Math.min(4, start);
+  return `${key.slice(0, start)}••••${key.slice(key.length - end)}`;
+}
 function accountProxy(account) { return account.stored.proxy_url || ''; }
 function proxyLabel(proxy) { return proxy === 'direct' ? '直连（direct）' : proxy || globalProxy || '直连（未设置全局代理）'; }
 
@@ -73,6 +79,10 @@ async function loadAccounts() {
   })));
   provider = nextProvider;
   globalProxy = proxy['proxy-url'] || '';
+  modelPrefix = config['model-prefix'] ?? 'opencode';
+  $('model-prefix').value = modelPrefix;
+  baseURL = config['base-url'] || defaultBase;
+  $('base-url').value = baseURL;
   accounts = nextAccounts;
   loaded = true;
   renderAccounts();
@@ -140,7 +150,7 @@ function renderAccounts() {
   const filter = $('status-filter').value;
   const visible = accounts.filter((account) => {
     const matchesStatus = filter === 'all' || (filter === 'disabled' ? account.disabled : !account.disabled);
-    return matchesStatus && [accountKey(account), proxyLabel(accountProxy(account)), accountBase(account)].some((value) => value.toLowerCase().includes(query));
+    return matchesStatus && [accountKey(account), proxyLabel(accountProxy(account))].some((value) => value.toLowerCase().includes(query));
   });
   $('summary').textContent = `${accounts.length} 把 Key · ${accounts.filter((account) => !account.disabled).length} 已启用`;
   $('result-count').textContent = visible.length === accounts.length ? `共 ${accounts.length} 条` : `显示 ${visible.length} / ${accounts.length} 条`;
@@ -154,16 +164,25 @@ function renderAccounts() {
     const key = accountKey(account), proxy = accountProxy(account);
     const row = document.createElement('tr');
     row.dataset.name = account.name;
-    const keyCell = element('td'); keyCell.dataset.label = 'API Key / 服务地址';
+    const keyCell = element('td'); keyCell.dataset.label = 'API Key';
     const keyLine = element('div', 'value-line');
-    keyLine.append(element('span', 'mono key-value', key), actionButton('复制 API Key', 'copy', () => copyValue(key, 'API Key'), 'btn icon-btn', false));
-    keyCell.append(keyLine, element('div', 'secondary mono', accountBase(account)));
-    if (account.status_message) keyCell.append(element('div', 'error-detail', account.status_message));
+    const keyValue = element('span', 'mono key-value', maskedKey(key));
+    keyValue.title = maskedKey(key);
+    keyLine.append(keyValue, actionButton('复制 API Key', 'copy', () => copyValue(key, 'API Key'), 'btn icon-btn', false));
+    keyCell.append(keyLine);
     const proxyCell = element('td'); proxyCell.dataset.label = '代理';
-    proxyCell.append(element('span', 'route-label', proxy === 'direct' ? '直连' : proxy ? '独立代理' : '全局代理'));
-    const proxyLine = element('div', 'value-line');
-    proxyLine.append(element('span', 'mono proxy-value', proxyLabel(proxy)));
+    proxyCell.title = proxy === 'direct' ? '直连' : proxy ? '独立代理' : '全局代理';
     const effectiveProxy = proxy === 'direct' ? '' : proxy || globalProxy;
+    let address = '直连';
+    if (effectiveProxy) {
+      const parsed = new URL(effectiveProxy);
+      const port = parsed.port || { 'http:': '80', 'https:': '443', 'socks5:': '1080', 'socks5h:': '1080' }[parsed.protocol];
+      address = `${parsed.hostname}:${port}`;
+    }
+    const proxyLine = element('div', 'value-line');
+    const proxyValue = element('span', 'mono proxy-value', address);
+    proxyValue.title = proxyLabel(proxy);
+    proxyLine.append(proxyValue);
     if (effectiveProxy) proxyLine.append(actionButton('复制代理地址', 'copy', () => copyValue(effectiveProxy, '代理地址'), 'btn icon-btn', false));
     proxyCell.append(proxyLine);
     const statusCell = element('td'); statusCell.dataset.label = '状态';
@@ -179,11 +198,33 @@ function renderAccounts() {
     statusCell.append(toggle);
     const actionsCell = element('td');
     const actions = element('div', 'row-actions');
-    actions.append(actionButton('编辑', 'edit', () => openEditor(account)), actionButton('删除', 'trash', () => openDelete(account), 'btn compact danger'));
+    actions.append(actionButton('测试', 'play', () => run(() => testAccount(account))), actionButton('编辑', 'edit', () => openEditor(account)), actionButton('删除', 'trash', () => openDelete(account), 'btn compact danger'));
     actionsCell.append(actions);
-    row.append(keyCell, proxyCell, statusCell, actionsCell);
+    const resultCell = element('td'); resultCell.dataset.label = '结果';
+    const result = testResults.get(account.name) || (account.status_message ? { kind: 'error-detail', text: account.status_message } : { kind: 'secondary', text: '未测试' });
+    const detail = element('div', `test-result ${result.kind}`, result.text);
+    detail.setAttribute('role', 'status');
+    detail.title = result.detail ? `${result.text}\n${result.detail}` : result.text;
+    resultCell.append(detail);
+    row.append(keyCell, proxyCell, statusCell, resultCell, actionsCell);
     root.append(row);
   }
+}
+
+async function testAccount(account) {
+  testResults.set(account.name, { kind: 'secondary', text: '测试中…' });
+  renderAccounts();
+  try {
+    const result = await api('/plugins/zen/test', { method: 'POST', body: JSON.stringify({ auth_index: account.auth_index }) });
+    const status = result.http_status ? `HTTP ${result.http_status} · ` : '';
+    testResults.set(account.name, {
+      kind: result.ok ? 'test-success' : 'error-detail',
+      text: result.ok ? `成功 · ${result.duration_ms} ms` : `失败 · ${status}${result.error}`,
+      detail: `模型：${result.model}\n${result.reply || result.error || ''}`,
+    });
+  } catch (error) {
+    testResults.set(account.name, { kind: 'error-detail', text: `失败 · ${error.message}` });
+  } finally { renderAccounts(); }
 }
 
 function selectedProxy() {
@@ -197,7 +238,7 @@ function updateEditor() {
   $('proxy-input-label').hidden = mode !== 'custom';
   $('proxy-url').required = mode === 'custom';
   $('proxy-hint').textContent = mode === 'global' ? `继承 CPA 设置：${proxyLabel('')}` : mode === 'direct' ? '此 Key 不经过代理，直接连接服务。' : '支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H，可包含用户名与密码。';
-  const unchanged = editing && $('api-key').value.trim() === accountKey(editing) && selectedProxy() === accountProxy(editing) && $('base-url').value.trim() === accountBase(editing);
+  const unchanged = editing && $('api-key').value.trim() === accountKey(editing) && selectedProxy() === accountProxy(editing);
   $('save').disabled = pending || !$('api-key').value.trim() || !!unchanged;
 }
 
@@ -209,7 +250,6 @@ function openEditor(account = null) {
   const mode = !proxy ? 'global' : proxy === 'direct' ? 'direct' : 'custom';
   document.querySelector(`input[name="proxy-mode"][value="${mode}"]`).checked = true;
   $('proxy-url').value = mode === 'custom' ? proxy : '';
-  $('base-url').value = account ? accountBase(account) : defaultBase;
   $('form-title').textContent = account ? '编辑 Key' : '添加 Key';
   $('save').textContent = account ? '保存修改' : '添加 Key';
   message('', 'error', 'editor-message');
@@ -219,7 +259,7 @@ function openEditor(account = null) {
 
 function openDelete(account) {
   deleting = account;
-  $('delete-key').textContent = accountKey(account);
+  $('delete-key').textContent = maskedKey(accountKey(account));
   $('delete-proxy').textContent = proxyLabel(accountProxy(account));
   message('', 'error', 'delete-message');
   $('delete-dialog').showModal();
@@ -229,12 +269,9 @@ async function saveAccount() {
   const target = editing;
   const key = $('api-key').value.trim(), proxy = selectedProxy();
   if (!key) throw new Error('请填写 API Key。');
-  let base;
-  try { base = new URL($('base-url').value.trim()); } catch { throw new Error('服务地址格式无效。'); }
-  if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) throw new Error('服务地址须为 HTTP 或 HTTPS 地址，不能包含用户名、密码、查询参数或片段。');
   validateProxy(proxy);
   if (accounts.some((account) => account.name !== target?.name && accountKey(account) === key)) throw new Error('此 Key 已存在，请编辑已有条目。');
-  const fields = { api_key: key, proxy_url: proxy, base_url: base.href.replace(/\/+$/, '') };
+  const fields = { api_key: key, proxy_url: proxy };
   if (target) {
     await api('/auth-files/fields', { method: 'PATCH', body: JSON.stringify({ name: target.name, ...fields }) });
     await removeLegacyKey(accountKey(target));
@@ -243,6 +280,7 @@ async function saveAccount() {
     await api(`/auth-files?name=zen-${id}.json`, { method: 'POST', body: JSON.stringify({ type: provider, provider, ...fields }) });
   }
   $('editor').close();
+  if (target) testResults.delete(target.name);
   await refreshAfterMutation(target ? '修改已保存。' : 'Key 已添加。');
 }
 
@@ -267,10 +305,29 @@ function setControls() {
   document.querySelectorAll('[data-mutation]').forEach((node) => { node.disabled = pending || !loaded; });
   $('refresh').disabled = pending;
   $('editor-fields').disabled = pending;
+  $('model-prefix').disabled = pending || !loaded;
+  $('base-url').disabled = pending || !loaded;
+  $('base-url').title = $('base-url').value;
+  $('model-prefix').title = $('model-prefix').value || '无前缀';
+  $('save-settings').disabled = pending || !loaded || ($('model-prefix').value.trim() === modelPrefix && $('base-url').value.trim() === baseURL);
   updateEditor();
 }
 
 $('key-form').addEventListener('submit', (event) => { event.preventDefault(); run(saveAccount); });
+$('settings-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  run(async () => {
+    const prefix = $('model-prefix').value.trim();
+    if (prefix.includes('/') || /\s/.test(prefix)) throw new Error('模型前缀不能包含斜杠或空白。');
+    let base;
+    try { base = new URL($('base-url').value.trim()); } catch { throw new Error('服务地址格式无效。'); }
+    if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || base.href.includes('?') || base.href.includes('#')) throw new Error('服务地址须为 HTTP 或 HTTPS 地址，不能包含用户名、密码、查询参数或片段。');
+    await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({ 'model-prefix': prefix, 'base-url': base.href.replace(/\/+$/, '') }) });
+    await refreshAfterMutation('插件设置已保存。');
+  });
+});
+$('model-prefix').addEventListener('input', setControls);
+$('base-url').addEventListener('input', setControls);
 $('key-form').addEventListener('input', updateEditor);
 $('search').addEventListener('input', () => { if (loaded) renderAccounts(); });
 $('status-filter').addEventListener('change', () => { if (loaded) renderAccounts(); });

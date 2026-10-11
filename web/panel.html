@@ -18,7 +18,7 @@
     .icons { position: absolute; width: 0; height: 0; overflow: hidden; }
     .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
     .copy-input { position: fixed; left: -9999px; top: 0; }
-    main { max-width: 1480px; padding: 90px 28px 28px; margin: 0 auto; }
+    main { max-width: 1080px; padding: 90px 28px 28px; margin: 0 auto; }
     .page-header, .header-title, .header-actions, .toolbar, .row-actions, .dialog-header, .dialog-footer { display: flex; align-items: center; gap: 10px; }
     .page-header { justify-content: space-between; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
     .header-title { gap: 14px; }
@@ -43,26 +43,34 @@
     .search input { width: 100%; border: 0; outline: 0; padding: 9px 0; color: var(--text); background: transparent; }
     select { min-height: 36px; padding: 7px 30px 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
     .summary { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th { text-align: left; background: var(--hover); padding: 11px 18px; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--border); }
-    td { padding: 18px; vertical-align: top; border-bottom: 1px solid var(--border); }
+    .settings-scroll { overflow-x: auto; margin-bottom: 16px; }
+    .plugin-settings { display: flex; align-items: center; gap: 10px; min-width: 640px; }
+    .plugin-settings label { font-size: 13px; font-weight: 550; white-space: nowrap; flex: none; }
+    .plugin-settings input { width: 130px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); min-width: 0; text-overflow: ellipsis; }
+    .plugin-settings #base-url { width: 360px; flex: none; }
+    .plugin-settings .btn { flex: none; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 1020px; border-collapse: collapse; table-layout: fixed; }
+    th { text-align: left; background: var(--hover); padding: 11px 14px; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    td { padding: 12px 14px; vertical-align: middle; border-bottom: 1px solid var(--border); white-space: nowrap; }
     tbody tr:last-child td { border-bottom: 0; }
     tbody tr:hover { background: var(--hover); }
-    .key-col { width: 40%; } .proxy-col { width: 31%; } .status-col { width: 14%; } .actions-col { width: 15%; }
-    .value-line { display: flex; align-items: flex-start; gap: 6px; }
+    .key-col { width: 200px; } .proxy-col { width: 210px; } .status-col { width: 112px; } .result-col { width: 254px; } .actions-col { width: 244px; }
+    .value-line { display: flex; align-items: center; gap: 6px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; overflow-wrap: anywhere; line-height: 1.65; font-size: 13px; }
-    .key-value { font-weight: 550; flex: 1; min-width: 0; user-select: all; }
-    .proxy-value { flex: 1; min-width: 0; user-select: all; }
-    .secondary { margin-top: 6px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; line-height: 1.6; }
-    .error-detail { color: var(--red); margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; line-height: 1.6; }
-    .route-label { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 5px; font-size: 11px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); }
+    .key-value { font-weight: 550; flex: 1; min-width: 0; user-select: all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .proxy-value { flex: 1; min-width: 0; user-select: all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .secondary { color: var(--muted); }
+    .error-detail { color: var(--red); }
     .status-toggle { display: inline-flex; align-items: center; gap: 8px; border: 0; padding: 3px 0; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
     .switch-track { width: 30px; height: 18px; border-radius: 20px; background: var(--border); padding: 3px; }
     .switch-track::after { content: ""; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--surface); }
     .status-toggle[aria-checked="true"] { color: var(--green); }
     .status-toggle[aria-checked="true"] .switch-track { background: var(--green); }
     .status-toggle[aria-checked="true"] .switch-track::after { transform: translateX(12px); background: #fff; }
-    .row-actions { gap: 6px; flex-wrap: wrap; }
+    .row-actions { gap: 6px; }
+    .test-result { font-size: 12px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .test-success { color: var(--green); }
     .empty { padding: 56px 20px; text-align: center; }
     .empty strong { display: block; font-size: 15px; margin-bottom: 8px; }
     .empty p { color: var(--muted); font-size: 13px; margin: 0; }
@@ -91,15 +99,11 @@
     .delete-detail .mono { display: block; margin: 5px 0 12px; }
     .delete-detail .mono:last-child { margin-bottom: 0; }
     @media (max-width: 960px) {
-      main { padding: 90px 20px 20px; } .key-col { width: 37%; } .proxy-col { width: 29%; } .status-col { width: 17%; } .actions-col { width: 17%; }
-      td, th { padding-left: 14px; padding-right: 14px; }
+      main { padding: 90px 20px 20px; }
     }
     @media (max-width: 680px) {
       main { padding: 90px 16px 16px; } .page-header { margin-bottom: 18px; } .header-actions { width: 100%; } .header-actions .btn { flex: 1; } h1 { font-size: 20px; }
       .toolbar { padding: 12px; gap: 8px; } .search { max-width: none; min-width: 0; } .summary { width: 100%; margin: 2px 0 0; }
-      table, tbody { display: block; } thead { display: none; } tbody tr { display: grid; grid-template-columns: 1fr 1fr; padding: 14px; border-bottom: 1px solid var(--border); gap: 14px; } tbody tr:last-child { border: 0; }
-      td { display: block; padding: 0; border: 0; min-width: 0; } td:nth-child(-n+2) { grid-column: 1 / -1; } td:nth-child(4) { justify-self: end; }
-      td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 6px; font-size: 11px; color: var(--muted); }
       .dialog-body { padding: 18px; } .dialog-header, .dialog-footer { padding: 16px 18px; } .workspace-footer { padding: 12px; }
     }
   </style>
@@ -107,6 +111,7 @@
 <body>
 <svg class="icons" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
   <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
   <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 8a7 7 0 0 1 12-2l2 3M18 16a7 7 0 0 1-12 2l-2-3"/></symbol>
   <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
   <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 8V4H4v11h4"/></symbol>
@@ -123,19 +128,24 @@
     </div>
   </header>
   <div id="message" class="notice" role="status" aria-live="polite" hidden></div>
+  <div class="settings-scroll"><form id="settings-form" class="plugin-settings">
+    <label for="base-url">服务地址</label><input id="base-url" class="mono" type="url" required spellcheck="false" value="https://opencode.ai/zen/v1">
+    <label for="model-prefix">模型前缀</label><input id="model-prefix" class="mono" type="text" value="opencode" spellcheck="false" placeholder="留空则不加前缀">
+    <button id="save-settings" class="btn compact" type="submit" data-mutation>保存</button>
+  </form></div>
   <section class="workspace" aria-label="Key 列表">
     <div class="toolbar">
-      <label class="search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="search" type="search" aria-label="搜索 Key、代理或服务地址" placeholder="搜索 Key、代理或服务地址" autocomplete="off"></label>
+      <label class="search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="search" type="search" aria-label="搜索 Key 或代理" placeholder="搜索 Key 或代理" autocomplete="off"></label>
       <select id="status-filter" aria-label="筛选状态"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select>
       <span id="summary" class="summary">正在加载…</span>
     </div>
-    <table id="key-table" hidden>
-      <colgroup><col class="key-col"><col class="proxy-col"><col class="status-col"><col class="actions-col"></colgroup>
-      <thead><tr><th scope="col">API Key / 服务地址</th><th scope="col">代理</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+    <div class="table-scroll"><table id="key-table" hidden>
+      <colgroup><col class="key-col"><col class="proxy-col"><col class="status-col"><col class="result-col"><col class="actions-col"></colgroup>
+      <thead><tr><th scope="col">API Key</th><th scope="col">代理</th><th scope="col">状态</th><th scope="col">结果</th><th scope="col">操作</th></tr></thead>
       <tbody id="accounts"></tbody>
-    </table>
+    </table></div>
     <div id="empty" class="empty"><strong id="empty-title">正在加载 Key</strong><p id="empty-description">读取 CPA 中的 Zen 凭据…</p></div>
-    <footer class="workspace-footer"><span>每行对应一把 Key，代理设置独立生效。</span><span id="result-count"></span></footer>
+    <footer class="workspace-footer"><span>每行对应一把 Key；测试使用该行代理发送简短请求，超时为 30 秒。</span><span id="result-count"></span></footer>
   </section>
 </main>
 <dialog id="editor" aria-labelledby="form-title">
@@ -155,7 +165,6 @@
           <input id="proxy-url" class="mono" type="text" autocomplete="off" spellcheck="false" placeholder="socks5h://127.0.0.1:10808" hidden>
           <span id="proxy-hint" class="hint"></span>
         </div>
-        <div class="field"><label for="base-url">服务地址</label><input id="base-url" class="mono" type="url" required spellcheck="false" value="https://opencode.ai/zen/v1"><span class="hint">默认使用 OpenCode Zen 官方服务。</span></div>
       </fieldset>
       <div id="editor-message" class="notice error" role="alert" hidden></div>
     </div>

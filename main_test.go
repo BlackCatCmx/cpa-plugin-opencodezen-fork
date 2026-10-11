@@ -334,14 +334,10 @@ func TestModelRegistrationDefaultFallback(t *testing.T) {
 	}
 }
 
-func TestBaseURLAndAPIKeyFromStorageJSON(t *testing.T) {
+func TestAPIKeyFromStorageJSON(t *testing.T) {
 	cfg := pluginConfig{Enabled: true, Provider: "zen", BaseURL: "https://default.url"}
 	req := executorRequest{
 		StorageJSON: []byte(`{"base_url": "https://custom.url/v1", "api_key": "sk-custom-key"}`),
-	}
-	u := baseURLForRequest(req, cfg)
-	if u != "https://custom.url/v1" {
-		t.Fatalf("baseURL = %q, want https://custom.url/v1", u)
 	}
 	k := apiKeyForRequest(req, cfg)
 	if k != "sk-custom-key" {

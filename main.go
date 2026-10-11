@@ -61,6 +61,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,7 +79,8 @@ const (
 	pluginID       = "zen"
 	pluginProvider = "zen"
 
-	zenBaseURL = "https://opencode.ai/zen/v1"
+	zenBaseURL         = "https://opencode.ai/zen/v1"
+	defaultModelPrefix = "opencode"
 
 	maxSessionIDBytes = 1024
 
@@ -145,6 +147,7 @@ type pluginConfig struct {
 	Client         string
 	Project        string
 	Models         []modelRoute
+	ModelPrefix    string
 	MaxBufferBytes int64
 }
 
@@ -155,6 +158,7 @@ func defaultPluginConfig() pluginConfig {
 		BaseURL:        zenBaseURL,
 		Client:         "cli",
 		Project:        "global",
+		ModelPrefix:    defaultModelPrefix,
 		MaxBufferBytes: 64 << 20,
 	}
 }
@@ -191,6 +195,16 @@ func configure(raw []byte) error {
 				return err
 			}
 			applyConfigNode(&cfg, node)
+			if value, exists := node["base-url"]; exists {
+				if _, ok := value.(string); !ok {
+					return fmt.Errorf("base-url must be a string")
+				}
+			}
+			if value, exists := node["model-prefix"]; exists {
+				if _, ok := value.(string); !ok {
+					return fmt.Errorf("model-prefix must be a string")
+				}
+			}
 			if value, exists := node["max-buffer-bytes"]; exists {
 				limit, ok := value.(int)
 				if !ok || limit < 0 {
@@ -208,6 +222,10 @@ func configure(raw []byte) error {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = zenBaseURL
 	}
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.ForceQuery {
+		return fmt.Errorf("base-url must be an HTTP or HTTPS service address without credentials, query or fragment")
+	}
 	if cfg.Client = strings.TrimSpace(cfg.Client); cfg.Client == "" {
 		cfg.Client = "cli"
 	}
@@ -215,6 +233,10 @@ func configure(raw []byte) error {
 		cfg.Project = "global"
 	}
 	cfg.APIKeys = trimNonEmpty(cfg.APIKeys)
+	cfg.ModelPrefix = strings.TrimSpace(cfg.ModelPrefix)
+	if strings.Contains(cfg.ModelPrefix, "/") || strings.ContainsFunc(cfg.ModelPrefix, unicode.IsSpace) {
+		return fmt.Errorf("model-prefix cannot contain slashes or whitespace")
+	}
 	cfg.ExcludeModels = trimNonEmpty(cfg.ExcludeModels)
 	for i := range cfg.Models {
 		m := &cfg.Models[i]
@@ -231,7 +253,13 @@ func configure(raw []byte) error {
 	if err := persistVirtualAuths(cfg); err != nil {
 		return err
 	}
+	previousBase := loadedConfig().BaseURL
 	storeConfig(cfg)
+	if previousBase != cfg.BaseURL {
+		discoveredModels.mu.Lock()
+		discoveredModels.ids, discoveredModels.fetchedAt = nil, time.Time{}
+		discoveredModels.mu.Unlock()
+	}
 	return nil
 }
 
@@ -271,7 +299,6 @@ func persistVirtualAuths(cfg pluginConfig) error {
 			"type":     cfg.Provider,
 			"provider": cfg.Provider,
 			"api_key":  key,
-			"base_url": cfg.BaseURL,
 		})
 		_, err := credentialHost("host.auth.save", map[string]any{
 			"Name": name,
@@ -303,6 +330,9 @@ func applyConfigNode(cfg *pluginConfig, node map[string]any) {
 	}
 	if v, ok := node["provider"].(string); ok {
 		cfg.Provider = v
+	}
+	if v, ok := node["model-prefix"].(string); ok {
+		cfg.ModelPrefix = v
 	}
 	if v, ok := node["base-url"].(string); ok {
 		cfg.BaseURL = v
@@ -587,6 +617,9 @@ func routeConfigured(cfg pluginConfig, model string) bool {
 // from a live retry > official endpoint table > name inference.
 func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 	model = strings.TrimSpace(model)
+	if cfg.ModelPrefix != "" {
+		model = strings.TrimPrefix(model, cfg.ModelPrefix+"/")
+	}
 	if model == "" {
 		return modelRoute{}, false
 	}
@@ -839,6 +872,8 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 				Logo:             "https://raw.githubusercontent.com/Victor9578/cpa-plugin-opencodezen/main/logo.svg",
 				ConfigFields: []any{
 					map[string]any{"Name": "enabled", "Type": "boolean", "Description": "Enable the zen provider plugin."},
+					map[string]any{"Name": "model-prefix", "Type": "string", "Description": "Prefix for all Zen model IDs; default opencode, empty disables the prefix."},
+					map[string]any{"Name": "base-url", "Type": "string", "Description": "Service address for all Zen credentials; default https://opencode.ai/zen/v1."},
 					map[string]any{"Name": "api-keys", "Type": "string", "Description": "OpenCode zen API keys (comma-separated). Each key becomes a virtual zen credential; alternatively drop key files into the auth directory."},
 					map[string]any{"Name": "exclude-models", "Type": "string", "Description": "Model IDs (comma-separated) to exclude from the models auto-discovered from the zen /models endpoint."},
 					map[string]any{"Name": "max-buffer-bytes", "Type": "integer", "Description": "Maximum buffered non-stream response or SSE event in bytes; default 67108864 (64 MiB), 0 disables the limit."},
@@ -944,7 +979,7 @@ func authParse(payload []byte) ([]byte, error) {
 					proxyURL, _ := stored["proxy_url"].(string)
 					disabled, _ := stored["disabled"].(bool)
 					if !disabled {
-						go refreshDiscoveredModels(authBaseURL(stored, cfg), key, proxyURL)
+						go refreshDiscoveredModels(cfg.BaseURL, key, proxyURL)
 					}
 					id := sha256Prefix(key)
 					fileName := req.FileName
@@ -1150,22 +1185,6 @@ var discoveredModels struct {
 	fetchedAt time.Time
 }
 
-// authBaseURL picks the base URL for discovery: the auth file's custom
-// service address if present, else plugin config, else the zen default.
-func authBaseURL(stored map[string]any, cfg pluginConfig) string {
-	for _, field := range []string{"base_url", "url"} {
-		if v, ok := stored[field].(string); ok {
-			if u := strings.TrimRight(strings.TrimSpace(v), "/"); u != "" {
-				return u
-			}
-		}
-	}
-	if cfg.BaseURL != "" {
-		return cfg.BaseURL
-	}
-	return zenBaseURL
-}
-
 // fetchZenModels lists free-tier model IDs from the zen /models endpoint.
 // Discovery uses the same credential proxy policy as execution.
 func fetchZenModels(baseURL, apiKey, proxyURL string) ([]string, error) {
@@ -1222,6 +1241,10 @@ func refreshDiscoveredModels(baseURL, apiKey, proxyURL string) {
 		return
 	}
 	discoveredModels.mu.Lock()
+	if baseURL != loadedConfig().BaseURL {
+		discoveredModels.mu.Unlock()
+		return
+	}
 	discoveredModels.ids, discoveredModels.fetchedAt = ids, time.Now()
 	discoveredModels.mu.Unlock()
 }
@@ -1236,7 +1259,7 @@ func discoveredZenModels(cfg pluginConfig) []string {
 	if fresh {
 		return ids
 	}
-	raw, err := callHost("host.auth.list", struct{}{})
+	raw, err := credentialHost("host.auth.list", struct{}{})
 	if err != nil {
 		return ids
 	}
@@ -1254,7 +1277,7 @@ func discoveredZenModels(cfg pluginConfig) []string {
 		if file.Provider != cfg.Provider || file.Disabled {
 			continue
 		}
-		raw, err := callHost("host.auth.get", map[string]string{"auth_index": file.AuthIndex})
+		raw, err := credentialHost("host.auth.get", map[string]string{"auth_index": file.AuthIndex})
 		if err != nil {
 			continue
 		}
@@ -1269,7 +1292,7 @@ func discoveredZenModels(cfg pluginConfig) []string {
 			continue
 		}
 		proxyURL, _ := saved.JSON["proxy_url"].(string)
-		refreshDiscoveredModels(authBaseURL(saved.JSON, cfg), key, proxyURL)
+		refreshDiscoveredModels(cfg.BaseURL, key, proxyURL)
 		break
 	}
 
@@ -1333,6 +1356,9 @@ func modelRegistration() ([]byte, error) {
 		}
 		// configure() and defaultZenModels guarantee Alias is non-empty.
 		alias := m.Alias
+		if cfg.ModelPrefix != "" {
+			alias = cfg.ModelPrefix + "/" + alias
+		}
 		caps := resolveModelCapabilities(m)
 		displayName := caps.DisplayName
 		if displayName == "" {
@@ -1400,7 +1426,7 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 		return nil, fmt.Errorf("zen provider has no api-key for request (please configure in AI Provider panel or plugins.configs.zen)")
 	}
 
-	baseURL := baseURLForRequest(req, cfg)
+	baseURL := cfg.BaseURL
 	headers := gateHeaders(req)
 
 	if !stream {
@@ -1478,31 +1504,6 @@ func executeNonStream(req executorRequest, cfg pluginConfig, route modelRoute, b
 		return nil, lastErr
 	}
 	return run(apiKey, headers)
-}
-
-// baseURLForRequest resolves the upstream base URL. It checks the host-selected
-// auth record (StorageJSON) first for any custom service address, falling back to
-// plugin config or the default https://opencode.ai/zen/v1.
-func baseURLForRequest(req executorRequest, cfg pluginConfig) string {
-	if len(req.StorageJSON) > 0 {
-		var stored struct {
-			BaseURL string `json:"base_url"`
-			URL     string `json:"url"`
-		}
-		if err := json.Unmarshal(req.StorageJSON, &stored); err == nil {
-			u := strings.TrimRight(strings.TrimSpace(stored.BaseURL), "/")
-			if u == "" {
-				u = strings.TrimRight(strings.TrimSpace(stored.URL), "/")
-			}
-			if u != "" {
-				return u
-			}
-		}
-	}
-	if cfg.BaseURL != "" {
-		return cfg.BaseURL
-	}
-	return zenBaseURL
 }
 
 // apiKeyForRequest resolves the zen API key for an executor request. It

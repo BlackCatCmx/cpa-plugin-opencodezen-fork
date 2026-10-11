@@ -1,23 +1,32 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 )
 
 //go:embed web/*
 var panelFiles embed.FS
 
 func panelRegistration() ([]byte, error) {
-	return okEnvelopeJSON(map[string]any{"resources": []map[string]string{
+	return okEnvelopeJSON(map[string]any{"routes": []map[string]string{
+		{"Method": "POST", "Path": "/plugins/zen/test"},
+	}, "resources": []map[string]string{
 		{"Path": "/panel", "Menu": "OpenCode Zen", "Description": "管理 Zen Key 和独立代理"},
 		{"Path": "/panel.mjs"},
 	}})
 }
 
 func handlePanel(payload []byte) ([]byte, error) {
-	var req struct{ Method, Path string }
+	var req struct {
+		Method, Path   string
+		Body           []byte
+		HostCallbackID string `json:"host_callback_id"`
+	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
@@ -25,6 +34,14 @@ func handlePanel(payload []byte) ([]byte, error) {
 	var body []byte
 	resource := strings.TrimPrefix(req.Path, "/v0/resource/plugins/"+pluginID)
 	switch {
+	case req.Path == "/v0/management/plugins/zen/test" && req.Method == "POST":
+		contentType = "application/json; charset=utf-8"
+		result, err := testCredential(req.Body, req.HostCallbackID)
+		if err != nil {
+			status = 400
+			result = map[string]any{"error": err.Error()}
+		}
+		body, _ = json.Marshal(result)
 	case req.Method != "GET":
 		status, body = 405, []byte("method not allowed")
 	case resource == "/panel":
@@ -46,4 +63,99 @@ func handlePanel(payload []byte) ([]byte, error) {
 		"Referrer-Policy":         {"no-referrer"},
 		"Content-Security-Policy": {"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"},
 	}, body})
+}
+
+func testCredential(body []byte, callbackID string) (map[string]any, error) {
+	var input struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	if err := json.Unmarshal(body, &input); err != nil || strings.TrimSpace(input.AuthIndex) == "" {
+		return nil, fmt.Errorf("请选择要测试的 Key")
+	}
+	raw, err := credentialHost("host.auth.get_runtime", map[string]string{"auth_index": input.AuthIndex})
+	if err != nil {
+		return nil, fmt.Errorf("读取凭据失败：%w", err)
+	}
+	var runtime struct {
+		Auth struct{ Provider string } `json:"auth"`
+	}
+	if err := json.Unmarshal(raw, &runtime); err != nil {
+		return nil, err
+	}
+	cfg := loadedConfig()
+	if !cfg.Enabled {
+		return nil, fmt.Errorf("Zen 插件已停用")
+	}
+	if runtime.Auth.Provider != cfg.Provider {
+		return nil, fmt.Errorf("所选凭据不是 Zen Key")
+	}
+	raw, err = credentialHost("host.auth.get", map[string]string{"auth_index": input.AuthIndex})
+	if err != nil {
+		return nil, fmt.Errorf("读取凭据失败：%w", err)
+	}
+	var saved struct {
+		JSON map[string]any `json:"json"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return nil, err
+	}
+	key := extractAPIKey(saved.JSON)
+	if key == "" {
+		return nil, fmt.Errorf("凭据缺少 API Key")
+	}
+	model := defaultZenModels[0].Model
+	if len(cfg.Models) > 0 {
+		model = cfg.Models[0].Model
+	}
+	route, _ := routeForModel(cfg, model)
+	if endpoint, known := officialZenEndpoint(route.Model); known && endpoint == endpointUnsupported && !routeConfigured(cfg, route.Model) {
+		return nil, fmt.Errorf("测试模型使用插件不支持的协议")
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"model": model, "max_tokens": 256,
+		"messages": []map[string]string{{"role": "user", "content": "Reply with OK, nothing else."}},
+	})
+	storage, _ := json.Marshal(saved.JSON)
+	req := executorRequest{Model: model, Payload: payload, StorageJSON: storage, HostCallbackID: callbackID}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	started := time.Now()
+	result := map[string]any{"ok": false, "model": model}
+	response, usedRoute, err := selectUpstream(ctx, req, cfg, route, cfg.BaseURL, gateHeaders(req), key)
+	if err == nil {
+		result["http_status"] = response.StatusCode
+		var data []byte
+		data, _, _, err = readUpstreamResponse(response)
+		if err == nil {
+			data, err = foldSSEToJSON(data, usedRoute.Endpoint)
+		}
+		if err == nil && usedRoute.Endpoint == "responses" {
+			data, err = responsesCompletionToChat(data, usedRoute.Model)
+		}
+		if err == nil {
+			var completion struct {
+				Choices []struct{ Message struct{ Content string } }
+			}
+			err = json.Unmarshal(data, &completion)
+			if err == nil && (len(completion.Choices) == 0 || strings.TrimSpace(completion.Choices[0].Message.Content) == "") {
+				err = fmt.Errorf("上游未返回有效文本回答")
+			}
+			if err == nil {
+				result["ok"] = true
+				result["reply"] = completion.Choices[0].Message.Content
+			}
+		}
+	}
+	result["duration_ms"] = time.Since(started).Milliseconds()
+	if err != nil {
+		if upstream, ok := err.(*upstreamError); ok {
+			result["http_status"] = upstream.status
+		}
+		message := strings.ReplaceAll(err.Error(), key, "[redacted]")
+		if proxy := proxyForRequest(req); proxy != "" {
+			message = strings.ReplaceAll(message, proxy, "[proxy]")
+		}
+		result["error"] = message
+	}
+	return result, nil
 }

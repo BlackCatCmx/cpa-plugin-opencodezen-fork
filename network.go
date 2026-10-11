@@ -122,6 +122,10 @@ func requestUpstream(ctx context.Context, callbackID, proxyURL, method, address 
 	if err != nil {
 		return nil, nil, 0, err
 	}
+	return readUpstreamResponse(handle)
+}
+
+func readUpstreamResponse(handle *hostStreamHandle) ([]byte, map[string][]string, int, error) {
 	defer handle.close()
 	limit := loadedConfig().MaxBufferBytes
 	var buffer bytes.Buffer

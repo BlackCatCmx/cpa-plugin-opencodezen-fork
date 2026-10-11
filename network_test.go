@@ -194,8 +194,10 @@ func TestAuthenticationFailureRetainsSelectedKeyAndHTTPStatus(t *testing.T) {
 	defer srv.Close()
 	_, _ = trackExecution([]byte(`{"RequestID":"auth-test","Metadata":{"selected_auth_index":"test"}}`))
 	defer completeExecution([]byte(`{"RequestID":"auth-test"}`))
-	resetConfig(t, testConfig())
-	req := executorRequest{Model: "mimo-v2.6-flash-free", Payload: chatPayload("mimo-v2.6-flash-free", "hello"), StreamID: "stream", Headers: map[string][]string{executionHeader: {"auth-test"}}, StorageJSON: []byte(fmt.Sprintf(`{"api_key":"selected","base_url":%q,"proxy_url":"direct"}`, srv.URL))}
+	cfg := testConfig()
+	cfg.BaseURL = srv.URL
+	resetConfig(t, cfg)
+	req := executorRequest{Model: "mimo-v2.6-flash-free", Payload: chatPayload("mimo-v2.6-flash-free", "hello"), StreamID: "stream", Headers: map[string][]string{executionHeader: {"auth-test"}}, StorageJSON: []byte(`{"api_key":"selected","base_url":"http://ignored.invalid","proxy_url":"direct"}`)}
 	payload, _ := json.Marshal(req)
 	for _, method := range []string{"executor.execute", "executor.execute_stream"} {
 		raw, status := processPluginCall(method, payload)

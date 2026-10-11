@@ -86,13 +86,19 @@ plugins:
 https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/registry.json
 ```
 
-安装本来源的 OpenCode Zen 后，侧栏会出现 **OpenCode Zen** 页面。先在 CPA 管理登录页勾选“记住登录”，然后在插件页面逐条添加 API Key、代理和服务地址。列表完整显示每把 Key 与对应代理，支持复制、搜索、状态筛选、编辑、启停和删除；添加和编辑在独立窗口中完成，配色跟随 CPA 主题。服务地址默认使用 `https://opencode.ai/zen/v1`。
+安装本来源的 OpenCode Zen 后，侧栏会出现 **OpenCode Zen** 页面。先在 CPA 管理登录页勾选“记住登录”，然后在插件页面逐条添加 API Key 和代理。列表显示 Key 的开头和结尾，中段打码；编辑窗口仍显示完整 Key，复制按钮复制完整 Key。代理只显示主机和端口，悬停查看完整地址，复制按钮复制完整地址。表格保持单行，超长内容显示省略号，悬停查看完整信息；Key 的悬停提示仍保持打码。列表支持搜索、状态筛选、编辑、启停和删除；添加和编辑在独立窗口中完成，配色跟随 CPA 主题。
 
 每个 Key 对应一份 CPA 凭据，继续由 CPA 调度。代理留空时，聊天和模型发现均使用 CPA 全局代理；填写 `direct` 强制直连；填写 HTTP、HTTPS、SOCKS5 或 SOCKS5H 地址则使用该 Key 的独立代理。代理错误会明确失败，不会自动改成直连。
 
 设置独立代理时，插件自行发送上游 HTTP 请求，不经过 CPA 的 HTTP 请求日志桥；CPA 仍负责客户端协议转换、凭据调度和结果返回。插件保留原有上游方言转换和 SSE 处理。CPA 的请求完成事件会取消客户端已断开的上游请求。
 
 已有凭据会直接显示在页面中。原来的插件配置 `api-keys` 仍可用于导入 Key，已有凭据不会因重新配置而被覆盖；从面板编辑或删除导入的 Key 时，会同步移除其旧导入配置。
+
+每行“操作”中的 **测试** 按钮使用插件统一服务地址和该行 Key、代理发送 `Reply with OK, nothing else.`，收到有效文本回答才显示成功，并显示耗时；成功或错误显示在“结果”栏，悬停可查看详情，超时为 30 秒。默认测试 `mimo-v2.6-flash-free`；配置了自定义模型列表时，测试其中第一个模型。测试不轮换 Key、不改代理、不改变凭据启停或冷却状态，仅验证本次所选模型的调用。
+
+页面顶部的“插件模型前缀”统一控制本插件全部模型，默认是 `opencode`，可改写或清空后保存。该设置保存在 `plugins.configs.zen.model-prefix`，不写入 Key 凭据。默认注册的调用名称如 `opencode/mimo-v2.6-flash-free`，不额外注册无前缀名称；清空后注册原始名称。插件发送上游请求时恢复原始模型名，自定义模型别名和自动发现的模型同样遵循此设置。
+
+服务地址与模型前缀在页面顶部同一行设置，默认是 `https://opencode.ai/zen/v1`，保存在 `plugins.configs.zen.base-url`。聊天、测试和模型发现统一使用此地址，凭据文件中的旧 `base_url` 或 `url` 不再覆盖它；修改地址会清除旧模型发现缓存。
 
 单次非流式响应和单个 SSE 事件的缓冲默认限制为 64 MiB，超限会明确报错并关闭上游连接。可在 `plugins.configs.zen.max-buffer-bytes` 中调整字节数，设为 `0` 关闭限制。流式响应的总长度不受此限制。
 
@@ -111,8 +117,7 @@ https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/r
   "type": "zen",
   "provider": "zen",
   "api_key": "sk-your-zen-api-key-here",
-  "proxy_url": "http://your-proxy:8080",
-  "base_url": "https://opencode.ai/zen/v1"
+  "proxy_url": "http://your-proxy:8080"
 }
 ```
 
@@ -192,13 +197,13 @@ docker restart cli-proxy-api
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $CPA_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mimo-v2.6-flash-free","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"opencode/mimo-v2.6-flash-free","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 
 # 测试 Responses 协议（pi / Codex 客户端路径）
 curl -s -N http://localhost:8080/backend-api/codex/responses \
   -H "Authorization: Bearer $CPA_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mimo-v2.6-flash-free","input":[{"role":"user","content":"Hello"}],"stream":true}'
+  -d '{"model":"opencode/mimo-v2.6-flash-free","input":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
 ---
