@@ -33,7 +33,11 @@ type catalogModel struct {
 	Modalities struct {
 		Input []string `json:"input"`
 	} `json:"modalities"`
-	Reasoning bool `json:"reasoning"`
+	Reasoning        bool `json:"reasoning"`
+	ReasoningOptions []struct {
+		Type   string   `json:"type"`
+		Values []string `json:"values"`
+	} `json:"reasoning_options"`
 }
 
 type modelMetadata struct {
@@ -86,6 +90,12 @@ func fetchCatalog(ctx context.Context, callbackID, proxy string) (map[string]mod
 		caps := modelCapabilities{DisplayName: model.Name, ContextLength: int64(model.Limit.Context), MaxCompletionTokens: int64(model.Limit.Output), InputModalities: model.Modalities.Input}
 		if model.Reasoning {
 			caps.Thinking = &thinkingSupport{ZeroAllowed: true, DynamicAllowed: true}
+		}
+		for _, option := range model.ReasoningOptions {
+			if option.Type == "effort" {
+				caps.ReasoningLevels = option.Values
+				caps.Thinking = &thinkingSupport{Levels: option.Values}
+			}
 		}
 		result[id] = modelMetadata{Endpoint: endpoint, Free: free, Capabilities: caps}
 	}
@@ -213,7 +223,7 @@ func panelModels() map[string]any {
 	ids := append([]string(nil), discoveredModels.ids...)
 	lastError, updatedAt := discoveredModels.lastError, discoveredModels.fetchedAt
 	discoveredModels.mu.RUnlock()
-	models := make([]map[string]string, 0)
+	models := make([]map[string]any, 0)
 	routes := cfg.Models
 	if len(routes) == 0 {
 		for _, id := range ids {
@@ -225,7 +235,7 @@ func panelModels() map[string]any {
 	for _, model := range routes {
 		route, _ := routeForModel(cfg, model.Model)
 		if route.Endpoint != endpointUnsupported {
-			models = append(models, map[string]string{"id": route.Model, "endpoint": route.Endpoint})
+			models = append(models, map[string]any{"id": route.Model, "endpoint": route.Endpoint, "reasoning_levels": resolveModelCapabilities(route).ReasoningLevels})
 		}
 	}
 	return map[string]any{"models": models, "error": lastError, "updated_at": updatedAt, "test_model": cfg.TestModel}

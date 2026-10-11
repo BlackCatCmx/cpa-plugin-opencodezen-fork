@@ -99,6 +99,8 @@ https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/r
 
 在 **测试模型** 下拉框中选择模型后，点击上方 **保存**，设置保存在 `plugins.configs.zen.test-model`。未选择模型时不会发送测试请求，也不默认选择内置模型。每行“操作”中的 **测试** 按钮使用插件统一服务地址和该行 Key、代理发送 `Reply with OK, nothing else.`，收到有效文本回答才显示成功，并显示耗时；成功或错误显示在“结果”栏，悬停可查看实际模型、协议、端点和回答，失败时附带脱敏的原始响应。超时为 30 秒。测试不轮换 Key、不改代理、不改变凭据启停或冷却状态，仅验证本次所选模型的调用。
 
+测试和正式调用都会补齐上游要求的工具定义，但不自动设置 `tool_choice`，下游明确指定的工具选择保持原意。模型可能返回工具调用，由下游客户端执行，插件不执行工具；只支持 `auto` 的模型仍会拒绝下游明确传入的 `none`、`required` 或指定工具选择。
+
 页面顶部的“插件模型前缀”统一控制本插件全部模型，默认是 `opencode`，可改写或清空后保存。该设置保存在 `plugins.configs.zen.model-prefix`，不写入 Key 凭据。默认注册的调用名称如 `opencode/mimo-v2.6-flash-free`，不额外注册无前缀名称；清空后注册原始名称。插件发送上游请求时恢复原始模型名，自定义模型别名和自动发现的模型同样遵循此设置。
 
 服务地址与模型前缀在页面顶部同一行设置，默认是 `https://opencode.ai/zen/v1`，保存在 `plugins.configs.zen.base-url`。聊天、测试和模型发现统一使用此地址，凭据文件中的旧 `base_url` 或 `url` 不再覆盖它；修改地址会清除旧模型发现缓存。
@@ -133,21 +135,24 @@ https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/r
 
 插件会向 CPA 宣告模型能力元数据（上下文窗口、输出上限、输入模态、推理档位、显示名），下游客户端（pi、Codex 等）通过 `/v1/models` 读取 `context_window` / `max_tokens` 等字段。
 
-内置规格表与 OpenCode 官方客户端自己的模型目录（models.dev 的 `opencode` provider）对齐，快照 2026-10-01：
+自动发现的模型能力来自官方 `https://models.opencode.ai/api.json`。插件读取 `reasoning_options` 中 `type: effort` 的 `values`，向 CPA 注册实际公布的思考等级。开关式思考和未公布设置的模型不编造等级；目录未覆盖的手动模型仍使用已有内置能力提示。
 
-| 模型 | 上下文 | 最大输出 | 推理档位 | 模态 |
-|---|---|---|---|---|
-| mimo-v2.6-flash-free / mimo-v2.5-free | 200K | 32K | 开关式 | 文本+图像 |
-| ling-3.0-flash-fin-free | 256K | 32K | 开关式 | 文本 |
-| nemotron-3-ultra-free | 1M | 128K | 开关式 | 文本 |
-| nemotron-3.5-lightning-free | 256K | 256K | 开关式 | 文本 |
-| muse-spark-1.3/1.2-contributor-free | 1M | 128K | minimal…xhigh | 文本+图像 |
-| longcat-2.5-preview-free | 1M | 128K | 开关式 | 文本+图像 |
-| space-bunny-free | 1M | 512K | low…max | 文本+图像 |
-| big-pickle | 200K | 32K | 开关式 | 文本 |
-| deepseek-v4-flash-free | 200K | 128K | low/high/max | 文本 |
+页面的 **思考强度覆盖** 默认收起，每个模型只配置一条规则，与 Key 无关。选择强度后点击页面顶部 **保存**；官方未公布等级时可手动填写。选择“上游默认”（手动填写 `default`）会移除客户端的强度参数，删除规则则恢复自动适配。该功能独立于 CPA 的 Payload 配置，不读取或执行宿主的 Payload 规则。
 
-> 注：不宣告能力时，CPA 的 codex 模型目录会用 gpt-5.5 模板兜底（272K/16K）——之前 muse 显示 272K 就是这个原因。
+- 有覆盖规则：直接使用指定强度，不被自动适配再修改。上游不支持手动填写的值时仍会明确报错。
+- 无覆盖规则：客户端指定的等级受支持则保留；不支持则使用 `medium`，没有 `medium` 或档位未知时移除强度参数，使用上游默认。
+- 客户端未指定且没有覆盖：使用上游默认。
+
+Chat 上游使用 `reasoning_effort`，Responses 上游使用 `reasoning.effort`，由插件按实际端点转换，无需手动选择协议。规则以原始上游模型 ID 保存，修改注册前缀不影响规则；模型拉取会更新可选档位，已有覆盖值保留，不自动改写。
+
+```yaml
+reasoning-overrides:
+  muse-spark-1.3-contributor-free: low
+  step-5-preview-free: medium
+  mimo-v2.6-flash-free: default
+```
+
+上述设置位于 `plugins.configs.zen` 下。
 
 如需覆盖或为其他模型声明能力，在 `config.yaml` 的 `plugins.configs.zen.models` 中配置：
 

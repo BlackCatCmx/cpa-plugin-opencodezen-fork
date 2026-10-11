@@ -6,6 +6,8 @@ let globalProxy = '';
 let modelPrefix = 'opencode';
 let baseURL = defaultBase;
 let testModel = '';
+let availableModels = [];
+let reasoningDirty = false;
 let editing = null;
 let deleting = null;
 let accounts = [];
@@ -87,11 +89,15 @@ async function loadAccounts() {
   accounts = nextAccounts;
   testModel = config['test-model'] || '';
   renderModels(models);
+  $('reasoning-rules').replaceChildren();
+  for (const [model, effort] of Object.entries(config['reasoning-overrides'] || {})) addReasoningRule(model, effort);
+  reasoningDirty = false;
   loaded = true;
   renderAccounts();
 }
 
 function renderModels(result) {
+  availableModels = result.models;
   const select = $('test-model');
   select.replaceChildren(new Option('请选择测试模型', ''));
   for (const model of result.models) select.add(new Option(`${model.id}${model.endpoint ? ` (${model.endpoint})` : ''}`, model.id));
@@ -100,6 +106,58 @@ function renderModels(result) {
   select.title = select.selectedOptions[0]?.textContent || '';
   $('pull-models').title = result.error || (result.updated_at && !result.updated_at.startsWith('0001') ? `最近拉取：${result.updated_at}` : '尚未拉取模型');
   if (result.error) message(`模型拉取失败：${result.error}；已保留已有列表。`, 'error');
+}
+
+function addReasoningRule(model = '', effort = '') {
+  const row = element('div', 'reasoning-row');
+  const select = element('select');
+  select.setAttribute('aria-label', '覆盖模型');
+  select.add(new Option('请选择模型', ''));
+  for (const item of availableModels) select.add(new Option(item.id, item.id));
+  if (model && !availableModels.some(item => item.id === model)) select.add(new Option(`${model}（不在当前列表）`, model));
+  select.value = model;
+  const renderEffort = (value) => {
+    row.querySelector('[data-effort]')?.remove();
+    const levels = availableModels.find(item => item.id === select.value)?.reasoning_levels || [];
+    let control;
+    if (levels.length) {
+      control = element('select', 'effort-select');
+      control.add(new Option('上游默认', 'default'));
+      for (const level of levels) control.add(new Option(level, level));
+      if (value && value !== 'default' && !levels.includes(value)) control.add(new Option(`${value}（当前目录未公布）`, value));
+      control.value = value || 'default';
+    } else {
+      control = element('input');
+      control.setAttribute('list', 'reasoning-suggestions');
+      control.value = value;
+      control.placeholder = '填写强度或 default';
+      control.title = '官方未公布档位；default 表示上游默认';
+    }
+    control.dataset.effort = '';
+    control.setAttribute('aria-label', '覆盖强度');
+    row.insertBefore(control, remove);
+  };
+  const remove = element('button', 'btn compact', '删除');
+  remove.type = 'button';
+  remove.dataset.mutation = '';
+  remove.addEventListener('click', () => { row.remove(); reasoningDirty = true; setControls(); });
+  select.addEventListener('change', () => { renderEffort(''); select.title = select.value; });
+  select.title = model;
+  row.append(select, remove);
+  renderEffort(effort);
+  $('reasoning-rules').append(row);
+}
+
+function reasoningOverrides() {
+  const rules = Object.create(null);
+  for (const row of $('reasoning-rules').children) {
+    const model = row.querySelector('select').value;
+    const effort = row.querySelector('[data-effort]').value.trim();
+    if (!model || !effort || /\s/.test(effort)) throw new Error('请选择覆盖模型，并填写不含空白的强度；default 表示上游默认。');
+    if (Object.hasOwn(rules, model)) throw new Error(`模型 ${model} 只能有一条覆盖规则。`);
+    rules[model] = effort;
+  }
+  return rules;
 }
 
 async function refreshAfterMutation(success) {
@@ -318,6 +376,7 @@ async function run(action) {
 }
 
 function setControls() {
+  $('reasoning-rules').querySelectorAll('input, select').forEach(node => { node.disabled = pending || !loaded; });
   document.querySelectorAll('[data-mutation]').forEach((node) => { node.disabled = pending || !loaded; });
   $('refresh').disabled = pending;
   $('editor-fields').disabled = pending;
@@ -327,7 +386,7 @@ function setControls() {
   $('test-model').title = $('test-model').selectedOptions[0]?.textContent || '';
   $('base-url').title = $('base-url').value;
   $('model-prefix').title = $('model-prefix').value || '无前缀';
-  $('save-settings').disabled = pending || !loaded || ($('model-prefix').value.trim() === modelPrefix && $('base-url').value.trim() === baseURL && $('test-model').value === testModel);
+  $('save-settings').disabled = pending || !loaded || (!reasoningDirty && $('model-prefix').value.trim() === modelPrefix && $('base-url').value.trim() === baseURL && $('test-model').value === testModel);
   updateEditor();
 }
 
@@ -340,17 +399,22 @@ $('settings-form').addEventListener('submit', (event) => {
     let base;
     try { base = new URL($('base-url').value.trim()); } catch { throw new Error('服务地址格式无效。'); }
     if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || base.href.includes('?') || base.href.includes('#')) throw new Error('服务地址须为 HTTP 或 HTTPS 地址，不能包含用户名、密码、查询参数或片段。');
-    await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({ 'model-prefix': prefix, 'base-url': base.href.replace(/\/+$/, ''), 'test-model': $('test-model').value }) });
+    await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({ 'model-prefix': prefix, 'base-url': base.href.replace(/\/+$/, ''), 'test-model': $('test-model').value, 'reasoning-overrides': reasoningOverrides() }) });
     await refreshAfterMutation('插件设置已保存。');
   });
 });
 $('model-prefix').addEventListener('input', setControls);
 $('base-url').addEventListener('input', setControls);
 $('test-model').addEventListener('change', setControls);
+$('add-reasoning').addEventListener('click', () => { addReasoningRule(); reasoningDirty = true; setControls(); });
+for (const event of ['input', 'change']) $('reasoning-rules').addEventListener(event, () => { reasoningDirty = true; setControls(); });
 $('pull-models').addEventListener('click', () => run(async () => {
   if ($('base-url').value.trim() !== baseURL) throw new Error('服务地址已修改，请先保存再拉取模型。');
   const result = await api('/plugins/zen/models/refresh', { method: 'POST' });
+  const rules = [...$('reasoning-rules').children].map(row => [row.querySelector('select').value, row.querySelector('[data-effort]').value]);
   renderModels(result);
+  $('reasoning-rules').replaceChildren();
+  for (const [model, effort] of rules) addReasoningRule(model, effort);
   try { await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({}) }); }
   catch (error) { throw new Error(`模型已拉取，但 CPA 更新失败：${error.message}`); }
   message(`模型信息已更新，当前可选 ${result.models.length} 个模型。选择测试模型后点击上方保存。`);

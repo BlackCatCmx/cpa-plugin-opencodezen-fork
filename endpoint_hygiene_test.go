@@ -550,51 +550,30 @@ func TestPrepareUpstreamBodyDropsReplayedReasoningItems(t *testing.T) {
 // =========================================================================
 
 func TestNormalizeReasoningEffort(t *testing.T) {
-	// Effort-type model (muse: minimal..xhigh): max maps to xhigh.
-	root := map[string]any{"reasoning_effort": "max"}
-	normalizeReasoningEffort(root, "chat", "muse-spark-1.3-contributor-free")
-	if root["reasoning_effort"] != "xhigh" {
-		t.Fatalf("muse max → %v, want xhigh", root["reasoning_effort"])
-	}
-
-	// Responses dialect: effort consolidates into reasoning.effort.
-	root = map[string]any{"reasoning": map[string]any{"effort": "max"}}
-	normalizeReasoningEffort(root, "responses", "muse-spark-1.3-contributor-free")
-	reasoning, _ := root["reasoning"].(map[string]any)
-	if reasoning["effort"] != "xhigh" {
-		t.Fatalf("responses muse effort = %v, want xhigh", reasoning["effort"])
-	}
-
-	// Toggle-only model (mimo): the parameter is rejected, drop it.
-	root = map[string]any{"reasoning_effort": "high"}
-	normalizeReasoningEffort(root, "chat", "mimo-v2.6-flash-free")
-	if _, ok := root["reasoning_effort"]; ok {
-		t.Fatalf("mimo is toggle-only, effort must be dropped: %v", root)
-	}
-
-	// deepseek-v4-flash-free supports low/high/max: medium maps to high.
-	root = map[string]any{"reasoning_effort": "medium"}
-	normalizeReasoningEffort(root, "chat", "deepseek-v4-flash-free")
-	if root["reasoning_effort"] != "high" {
-		t.Fatalf("deepseek medium → %v, want high", root["reasoning_effort"])
-	}
-
-	// Unknown model: clamp to the safe set.
-	root = map[string]any{"reasoning_effort": "max"}
-	normalizeReasoningEffort(root, "chat", "some-new-model")
-	if root["reasoning_effort"] != "high" {
-		t.Fatalf("unknown max → %v, want high", root["reasoning_effort"])
-	}
-
-	// off/none means no thinking.
-	root = map[string]any{"reasoning_effort": "off"}
-	normalizeReasoningEffort(root, "chat", "muse-spark-1.3-contributor-free")
-	if _, ok := root["reasoning_effort"]; ok {
-		t.Fatalf("effort off must be dropped: %v", root)
+	resetConfig(t, defaultPluginConfig())
+	for _, tc := range []struct{ model, input, want string }{
+		{"muse-spark-1.3-contributor-free", "max", "medium"},
+		{"muse-spark-1.3-contributor-free", "high", "high"},
+		{"mimo-v2.6-flash-free", "high", ""},
+		{"deepseek-v4-flash-free", "medium", ""},
+		{"some-new-model", "max", ""},
+	} {
+		for _, endpoint := range []string{"chat", "responses"} {
+			root := map[string]any{"reasoning_effort": tc.input}
+			normalizeReasoningEffort(root, endpoint, tc.model)
+			got, _ := root["reasoning_effort"].(string)
+			if endpoint == "responses" {
+				reasoning, _ := root["reasoning"].(map[string]any)
+				got, _ = reasoning["effort"].(string)
+			}
+			if got != tc.want {
+				t.Fatalf("%s %s %s -> %q, want %q", tc.model, endpoint, tc.input, got, tc.want)
+			}
+		}
 	}
 
 	// The anthropic-style thinking object never survives.
-	root = map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 8192}}
+	root := map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 8192}}
 	normalizeReasoningEffort(root, "chat", "muse-spark-1.3-contributor-free")
 	if _, ok := root["thinking"]; ok {
 		t.Fatalf("thinking object survived: %v", root)
@@ -604,7 +583,7 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 	// the responses dialect, minus any effort key.
 	root = map[string]any{"reasoning": map[string]any{"summary": "auto"}}
 	normalizeReasoningEffort(root, "responses", "muse-spark-1.3-contributor-free")
-	reasoning, _ = root["reasoning"].(map[string]any)
+	reasoning, _ := root["reasoning"].(map[string]any)
 	if reasoning["summary"] != "auto" {
 		t.Fatalf("reasoning.summary lost: %v", root)
 	}
@@ -626,6 +605,43 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 // =========================================================================
 // output token clamping
 // =========================================================================
+
+func TestReasoningOverridesBothProtocols(t *testing.T) {
+	for _, endpoint := range []string{"chat", "responses"} {
+		for _, override := range []string{"low", "default", "future-level"} {
+			cfg := defaultPluginConfig()
+			cfg.ReasoningOverrides = map[string]string{"custom-model": override}
+			resetConfig(t, cfg)
+			for _, input := range []string{"max", ""} {
+				payload := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "OK"}}}
+				if input != "" {
+					payload["reasoning_effort"] = input
+				}
+				encoded, _ := json.Marshal(payload)
+				body, err := prepareUpstreamBody(executorRequest{Payload: encoded}, modelRoute{Model: "custom-model", Endpoint: endpoint})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var root map[string]any
+				if err := json.Unmarshal(body, &root); err != nil {
+					t.Fatal(err)
+				}
+				got, _ := root["reasoning_effort"].(string)
+				if endpoint == "responses" {
+					reasoning, _ := root["reasoning"].(map[string]any)
+					got, _ = reasoning["effort"].(string)
+				}
+				want := override
+				if want == "default" {
+					want = ""
+				}
+				if got != want {
+					t.Fatalf("%s override %q, input %q -> %q", endpoint, override, input, got)
+				}
+			}
+		}
+	}
+}
 
 func TestClampMaxOutput(t *testing.T) {
 	root := map[string]any{"max_tokens": 999999.0}
@@ -658,8 +674,8 @@ func TestEnsureGateToolsToollessRequest(t *testing.T) {
 	if len(tools) != len(officialGateTools) {
 		t.Fatalf("tools = %d, want the full official set", len(tools))
 	}
-	if root["tool_choice"] != "none" {
-		t.Fatalf("tool_choice = %v, want none (client sent no tools)", root["tool_choice"])
+	if _, exists := root["tool_choice"]; exists {
+		t.Fatalf("tool_choice must remain absent: %v", root["tool_choice"])
 	}
 
 	// An explicit tool_choice is never overwritten.

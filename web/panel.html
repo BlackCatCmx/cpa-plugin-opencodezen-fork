@@ -51,6 +51,13 @@
     .plugin-settings input { width: 130px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); min-width: 0; text-overflow: ellipsis; }
     .plugin-settings #base-url { width: 360px; flex: none; }
     .plugin-settings .btn { flex: none; }
+    .reasoning-settings { margin-bottom: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .reasoning-settings summary { cursor: pointer; font-weight: 550; }
+    .reasoning-settings .hint { margin: 10px 0; }
+    .reasoning-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .reasoning-row select { width: 320px; min-width: 0; text-overflow: ellipsis; }
+    .reasoning-row input { width: 160px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--bg); }
+    .reasoning-row .effort-select { width: 160px; }
     .table-scroll { overflow-x: auto; }
     table { width: 1020px; border-collapse: collapse; table-layout: fixed; }
     th { text-align: left; background: var(--hover); padding: 11px 14px; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -135,6 +142,13 @@
     <label for="model-prefix">模型前缀</label><input id="model-prefix" class="mono" type="text" value="opencode" spellcheck="false" placeholder="留空则不加前缀">
     <button id="save-settings" class="btn compact" type="submit" data-mutation>保存</button>
   </form></div>
+  <details class="reasoning-settings">
+    <summary>思考强度覆盖</summary>
+    <p class="hint">覆盖优先于客户端设置。未配置规则的模型保留受支持的强度；不支持时使用 medium，没有 medium 或档位未知时使用上游默认。修改后点击上方保存。</p>
+    <div id="reasoning-rules"></div>
+    <datalist id="reasoning-suggestions"><option value="default" label="上游默认"><option value="minimal"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
+    <button id="add-reasoning" class="btn compact" type="button" data-mutation>添加规则</button>
+  </details>
   <section class="workspace" aria-label="Key 列表">
     <div class="toolbar">
       <label class="search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="search" type="search" aria-label="搜索 Key 或代理" placeholder="搜索 Key 或代理" autocomplete="off"></label>

@@ -139,17 +139,18 @@ func (m modelRoute) EndpointPath() string {
 }
 
 type pluginConfig struct {
-	Enabled        bool
-	Provider       string
-	BaseURL        string
-	APIKeys        []string
-	ExcludeModels  []string
-	Client         string
-	Project        string
-	Models         []modelRoute
-	ModelPrefix    string
-	TestModel      string
-	MaxBufferBytes int64
+	Enabled            bool
+	Provider           string
+	BaseURL            string
+	APIKeys            []string
+	ExcludeModels      []string
+	Client             string
+	Project            string
+	Models             []modelRoute
+	ModelPrefix        string
+	TestModel          string
+	ReasoningOverrides map[string]string
+	MaxBufferBytes     int64
 }
 
 func defaultPluginConfig() pluginConfig {
@@ -196,6 +197,20 @@ func configure(raw []byte) error {
 				return err
 			}
 			applyConfigNode(&cfg, node)
+			if value, exists := node["reasoning-overrides"]; exists {
+				rules, ok := value.(map[string]any)
+				if !ok {
+					return fmt.Errorf("reasoning-overrides must be a model-to-effort mapping")
+				}
+				cfg.ReasoningOverrides = make(map[string]string, len(rules))
+				for model, raw := range rules {
+					effort, ok := raw.(string)
+					if !ok || strings.TrimSpace(model) == "" || strings.TrimSpace(effort) == "" || strings.ContainsFunc(strings.TrimSpace(effort), unicode.IsSpace) {
+						return fmt.Errorf("reasoning-overrides requires non-empty model names and effort strings without whitespace")
+					}
+					cfg.ReasoningOverrides[model] = strings.TrimSpace(effort)
+				}
+			}
 			if value, exists := node["base-url"]; exists {
 				if _, ok := value.(string); !ok {
 					return fmt.Errorf("base-url must be a string")
@@ -2412,8 +2427,7 @@ type officialGateTool struct {
 // officialGateTools mirrors the OpenCode client's built-in tool set. The
 // zen free tier expects this set to be present; requests carrying no tools
 // at all (compaction/summarization, plain chat clients) get the full set
-// injected with tool_choice "none" so the gate passes while the model is
-// still barred from calling tools the client cannot execute.
+// injected. Tool choice remains under the downstream client's control.
 var officialGateTools = []officialGateTool{
 	{
 		name:        "bash",
@@ -2496,10 +2510,9 @@ var officialGateTools = []officialGateTool{
 // six core tools missing from the request is appended (dialect-appropriate
 // shape) and the list is sorted by function name, matching the official
 // client's alphabetical ordering. Requests without any tools get the full
-// set plus tool_choice "none".
+// set without changing the client's tool choice.
 func ensureGateTools(root map[string]any, dialect string) {
 	tools, _ := root["tools"].([]any)
-	hadTools := len(tools) > 0
 	names := map[string]bool{}
 	for _, item := range tools {
 		entry, ok := item.(map[string]any)
@@ -2520,11 +2533,6 @@ func ensureGateTools(root map[string]any, dialect string) {
 		return toolEntryName(a, dialect) < toolEntryName(b, dialect)
 	})
 	root["tools"] = tools
-	if !hadTools {
-		if _, exists := root["tool_choice"]; !exists {
-			root["tool_choice"] = "none"
-		}
-	}
 }
 
 func toolEntryName(entry map[string]any, dialect string) string {
@@ -2589,14 +2597,8 @@ func sanitizeResponsesUpstreamInput(root map[string]any) {
 	root["input"] = out
 }
 
-// normalizeReasoningEffort clamps the requested reasoning effort to what
-// the model supports. The zen gateway resolves the effort into a provider
-// variant (reasoningEffort / reasoning_effort / reasoning.effort are all
-// read), and unsupported values answer 400 "Invalid request parameters".
-// Effort-type models keep values from their catalog level set; toggle-only
-// models (mimo, nemotron, ...) drop the parameter entirely; unknown models
-// fall back to the safe low/medium/high set. The anthropic-style top-level
-// "thinking" object is always removed.
+// normalizeReasoningEffort applies per-model overrides and adapts unsupported
+// effort to medium when available, otherwise leaving upstream defaults.
 func normalizeReasoningEffort(root map[string]any, endpoint, model string) {
 	delete(root, "thinking")
 
@@ -2616,17 +2618,30 @@ func normalizeReasoningEffort(root map[string]any, endpoint, model string) {
 	delete(root, "reasoning_effort")
 	delete(root, "reasoningEffort")
 
-	spec, known := zenModelSpec(model)
-	if effort != "" {
-		switch {
-		case known && len(spec.ReasoningLevels) == 0:
-			// Toggle-only thinking: the effort parameter is rejected.
+	cfg := loadedConfig()
+	if override, exists := cfg.ReasoningOverrides[model]; exists {
+		effort = override
+		if effort == "default" {
 			effort = ""
-		case known:
-			effort = clampEffortToLevels(effort, spec.ReasoningLevels)
-		default:
-			// Unknown model: only the universally safe set.
-			effort = clampEffortToLevels(effort, []string{"low", "medium", "high"})
+		}
+	} else if effort != "" {
+		caps, _ := zenModelSpec(model)
+		for _, route := range cfg.Models {
+			if route.Model == model {
+				caps = resolveModelCapabilities(route)
+				break
+			}
+		}
+		supported, hasMedium := false, false
+		for _, level := range caps.ReasoningLevels {
+			supported = supported || level == effort
+			hasMedium = hasMedium || level == "medium"
+		}
+		if !supported {
+			effort = ""
+			if hasMedium {
+				effort = "medium"
+			}
 		}
 	}
 
@@ -2650,44 +2665,6 @@ func normalizeReasoningEffort(root map[string]any, endpoint, model string) {
 	if effort != "" {
 		root["reasoning_effort"] = effort
 	}
-}
-
-// clampEffortToLevels maps an effort value onto the supported level set.
-// An empty result means "drop the parameter".
-func clampEffortToLevels(effort string, levels []string) string {
-	has := func(v string) bool {
-		for _, l := range levels {
-			if l == v {
-				return true
-			}
-		}
-		return false
-	}
-	if has(effort) {
-		return effort
-	}
-	if effort == "off" || effort == "none" || effort == "" {
-		return ""
-	}
-	// Alias mapping: nearest supported level wins.
-	aliases := map[string][]string{
-		"max":     {"xhigh", "high"},
-		"xhigh":   {"high"},
-		"ultra":   {"high"},
-		"minimal": {"low"},
-		"mini":    {"low"},
-	}
-	for _, candidate := range aliases[effort] {
-		if has(candidate) {
-			return candidate
-		}
-	}
-	for _, fallback := range []string{"high", "medium", "low"} {
-		if has(fallback) {
-			return fallback
-		}
-	}
-	return ""
 }
 
 // clampMaxOutput caps the requested output tokens at the model's catalog

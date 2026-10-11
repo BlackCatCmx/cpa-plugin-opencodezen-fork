@@ -33,7 +33,7 @@ func TestDiscoveryPricesProtocolsAndCache(t *testing.T) {
 				return
 			}
 			fmt.Fprint(w, `{"opencode":{"npm":"@ai-sdk/openai-compatible","models":{
-			"limited-preview":{"cost":{"input":0,"output":0},"limit":{"context":123456,"output":2048},"reasoning":true},
+			"limited-preview":{"cost":{"input":0,"output":0},"limit":{"context":123456,"output":2048},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high","xhigh"]}]},
 			"mimo-new-free":{"cost":{"input":0,"output":0}},
 			"paid-free":{"cost":{"input":1,"output":2}},
 			"messages-free":{"cost":{"input":0,"output":0},"provider":{"npm":"@ai-sdk/anthropic"}}
@@ -72,6 +72,14 @@ func TestDiscoveryPricesProtocolsAndCache(t *testing.T) {
 	caps := resolveModelCapabilities(route)
 	if caps.ContextLength != 123456 || caps.MaxCompletionTokens != 2048 || caps.Thinking == nil {
 		t.Fatalf("capabilities=%+v", caps)
+	}
+	if !reflect.DeepEqual(caps.ReasoningLevels, []string{"low", "medium", "high", "xhigh"}) || !reflect.DeepEqual(caps.Thinking.Levels, caps.ReasoningLevels) {
+		t.Fatalf("discovered reasoning levels = %+v", caps)
+	}
+	root := map[string]any{"reasoning_effort": "max"}
+	normalizeReasoningEffort(root, "responses", "limited-preview")
+	if root["reasoning"].(map[string]any)["effort"] != "medium" {
+		t.Fatalf("live effort adaptation = %v", root)
 	}
 	cfg.Models = []modelRoute{{Model: "limited-preview", Alias: "public"}}
 	route, _ = routeForModel(cfg, "opencode/public")

@@ -121,6 +121,33 @@ func TestConfigureParsesModels(t *testing.T) {
 	}
 }
 
+func TestConfigureReasoningOverrides(t *testing.T) {
+	resetConfig(t, defaultPluginConfig())
+	for _, tc := range []struct {
+		yaml  string
+		valid bool
+	}{
+		{"reasoning-overrides:\n  custom-model: low\n  another-model: default\n", true},
+		{"reasoning-overrides: {}\n", true},
+		{"reasoning-overrides: []\n", false},
+		{"reasoning-overrides:\n  custom-model: 1\n", false},
+		{"reasoning-overrides:\n  custom-model: ''\n", false},
+	} {
+		payload, _ := json.Marshal(map[string]any{"config_yaml": []byte(tc.yaml)})
+		before := loadedConfig()
+		err := configure(payload)
+		if (err == nil) != tc.valid {
+			t.Fatalf("configure %q: %v", tc.yaml, err)
+		}
+		if err != nil && len(loadedConfig().ReasoningOverrides) != len(before.ReasoningOverrides) {
+			t.Fatal("invalid config changed the active rules")
+		}
+		if tc.valid && strings.Contains(tc.yaml, "custom-model") && loadedConfig().ReasoningOverrides["custom-model"] != "low" {
+			t.Fatal("override was not saved")
+		}
+	}
+}
+
 func TestModelRegistration(t *testing.T) {
 	resetConfig(t, testConfig())
 	out, err := modelRegistration()
@@ -712,6 +739,40 @@ func TestEnsureGateToolsIdempotent(t *testing.T) {
 		cur, _ := tools[i].(map[string]any)
 		if toolEntryName(prev, "chat") > toolEntryName(cur, "chat") {
 			t.Fatal("tools are not sorted by function name")
+		}
+	}
+}
+
+func TestPrepareUpstreamBodyPreservesToolChoice(t *testing.T) {
+	for _, endpoint := range []string{"chat", "responses"} {
+		for _, choice := range []string{"", "auto", "none", "required"} {
+			t.Run(endpoint+"/"+choice, func(t *testing.T) {
+				payload := map[string]any{
+					"messages": []any{map[string]any{"role": "user", "content": "Reply with OK, nothing else."}},
+				}
+				if choice != "" {
+					payload["tool_choice"] = choice
+				}
+				encoded, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := prepareUpstreamBody(executorRequest{Payload: encoded}, modelRoute{Model: "muse-spark-1.3-contributor-free", Endpoint: endpoint})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var root map[string]any
+				if err := json.Unmarshal(body, &root); err != nil {
+					t.Fatal(err)
+				}
+				got, exists := root["tool_choice"]
+				if choice == "" && exists || choice != "" && got != choice {
+					t.Fatalf("tool_choice = %v, present=%v; want %q", got, exists, choice)
+				}
+				if tools, _ := root["tools"].([]any); len(tools) != len(officialGateTools) {
+					t.Fatalf("gate tools = %d, want %d", len(tools), len(officialGateTools))
+				}
+			})
 		}
 	}
 }
