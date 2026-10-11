@@ -134,7 +134,7 @@ func testCredential(body []byte, callbackID string) (map[string]any, error) {
 	defer cancel()
 	started := time.Now()
 	result := map[string]any{"ok": false, "model": model}
-	response, usedRoute, err := selectUpstream(ctx, req, cfg, route, cfg.BaseURL, gateHeaders(req), key)
+	response, usedRoute, err := selectUpstream(ctx, req, route, cfg.BaseURL, gateHeaders(req), key)
 	result["protocol"], result["endpoint"] = usedRoute.Endpoint, cfg.BaseURL+usedRoute.EndpointPath()
 	var rawResponse []byte
 	if err == nil {

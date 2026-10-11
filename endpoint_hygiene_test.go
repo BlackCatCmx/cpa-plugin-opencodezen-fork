@@ -54,40 +54,9 @@ func TestOfficialZenEndpointClassifications(t *testing.T) {
 	}
 }
 
-func TestCandidateEndpoints(t *testing.T) {
-	cfg := testConfig() // mimo pinned chat, muse pinned responses
-	cases := []struct {
-		model string
-		want  []string
-	}{
-		{"mimo-v2.6-flash-free", []string{"chat"}}, // pinned: no retry
-		{"muse-spark-1.3-contributor-free", []string{"responses"}},
-		{"longcat-2.5-preview-free", []string{"chat", "responses"}}, // table hint + fallback
-		{"gpt-5.5", []string{"responses", "chat"}},                  // responses-first + fallback
-	}
-	for _, c := range cases {
-		route, ok := routeForModel(cfg, c.model)
-		if !ok {
-			t.Fatalf("routeForModel(%q) not ok", c.model)
-		}
-		got := candidateEndpoints(cfg, route)
-		if len(got) != len(c.want) {
-			t.Errorf("candidateEndpoints(%q) = %v, want %v", c.model, got, c.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != c.want[i] {
-				t.Errorf("candidateEndpoints(%q) = %v, want %v", c.model, got, c.want)
-				break
-			}
-		}
-	}
-}
-
 func TestRouteForModelConfiguredWithoutEndpointUsesTable(t *testing.T) {
 	// A config entry that pins only alias/capabilities must not silently
-	// force the chat endpoint; the official table resolves it and the
-	// dialect retry stays enabled (routeConfigured == false).
+	// force the chat endpoint; the official table resolves it.
 	cfg := pluginConfig{
 		Enabled:  true,
 		Provider: "zen",
@@ -99,23 +68,6 @@ func TestRouteForModelConfiguredWithoutEndpointUsesTable(t *testing.T) {
 	}
 	if routeConfigured(cfg, "gpt-5.5") {
 		t.Fatal("routeConfigured = true for an entry without an endpoint")
-	}
-}
-
-func TestRouteForModelUsesLearnedEndpoint(t *testing.T) {
-	learnedEndpoints.mu.Lock()
-	old := learnedEndpoints.m
-	learnedEndpoints.m = map[string]string{"learned-model": "responses"}
-	learnedEndpoints.mu.Unlock()
-	defer func() {
-		learnedEndpoints.mu.Lock()
-		learnedEndpoints.m = old
-		learnedEndpoints.mu.Unlock()
-	}()
-
-	route, ok := routeForModel(testConfig(), "learned-model")
-	if !ok || route.Endpoint != "responses" {
-		t.Fatalf("route = %+v, ok=%v; want learned endpoint responses", route, ok)
 	}
 }
 

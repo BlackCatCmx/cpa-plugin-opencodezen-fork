@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -153,30 +152,63 @@ func TestCompletionCancelsLocalRequest(t *testing.T) {
 	}
 }
 
-func TestStreamEndpointRetryKeepsKeyAndReturnsUsedDialect(t *testing.T) {
-	var keys []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		keys = append(keys, r.Header.Get("Authorization"))
-		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			w.WriteHeader(404)
-			return
+func TestProtocolErrorsRetainSelectedEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"chat", "responses"} {
+		for _, status := range []int{400, 404, 405} {
+			t.Run(fmt.Sprintf("%s-%d", endpoint, status), func(t *testing.T) {
+				mockSelectedCredential(t, "zen", "direct")
+				host := credentialHost
+				credentialHost = func(method string, payload any) (json.RawMessage, error) {
+					if method == "host.auth.get" {
+						return json.RawMessage(`{"json":{"api_key":"selected","proxy_url":"direct"}}`), nil
+					}
+					return host(method, payload)
+				}
+				_, _ = trackExecution([]byte(`{"RequestID":"protocol-test","Metadata":{"selected_auth_index":"selected"}}`))
+				defer completeExecution([]byte(`{"RequestID":"protocol-test"}`))
+				paths := []string{}
+				originalError := `{"error":{"type":"InvalidRequest","message":"original upstream error"}}`
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					paths = append(paths, r.URL.Path)
+					if r.Header.Get("Authorization") != "Bearer selected" {
+						t.Error("wrong selected credential")
+					}
+					w.WriteHeader(status)
+					fmt.Fprint(w, originalError)
+				}))
+				defer server.Close()
+				cfg := defaultPluginConfig()
+				cfg.BaseURL = server.URL
+				cfg.TestModel = "muse-spark-test"
+				resetConfig(t, cfg)
+				discoveredModels.mu.Lock()
+				previous := discoveredModels.metadata
+				discoveredModels.metadata = map[string]modelMetadata{"muse-spark-test": {Endpoint: endpoint}}
+				discoveredModels.mu.Unlock()
+				t.Cleanup(func() { discoveredModels.mu.Lock(); discoveredModels.metadata = previous; discoveredModels.mu.Unlock() })
+				req := executorRequest{Model: cfg.TestModel, Payload: chatPayload(cfg.TestModel, "hello"), StorageJSON: []byte(`{"api_key":"selected","proxy_url":"direct"}`), StreamID: "diagnostic", Headers: map[string][]string{executionHeader: {"protocol-test"}}}
+				payload, _ := json.Marshal(req)
+				for _, stream := range []bool{false, true} {
+					_, err := execute(payload, stream)
+					upstream, ok := err.(*upstreamError)
+					if !ok || upstream.status != status || upstream.raw != originalError {
+						t.Fatalf("upstream error=%v", err)
+					}
+				}
+				result, err := testCredential([]byte(`{"auth_index":"selected"}`), "")
+				if err != nil || result["protocol"] != endpoint || result["raw"] != originalError || result["http_status"] != status {
+					t.Fatalf("test result=%v, err=%v", result, err)
+				}
+				if len(paths) != 3 {
+					t.Fatalf("requests=%v", paths)
+				}
+				for _, path := range paths {
+					if path != (modelRoute{Endpoint: endpoint}).EndpointPath() {
+						t.Fatalf("protocol changed: %v", paths)
+					}
+				}
+			})
 		}
-		fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
-	}))
-	defer srv.Close()
-	cfg := defaultPluginConfig()
-	req := executorRequest{Model: "custom", Payload: chatPayload("custom", "hello"), AuthMetadata: map[string]any{"proxy_url": "direct"}}
-	handle, route, err := selectUpstream(context.Background(), req, cfg, modelRoute{Model: "custom", Endpoint: "chat"}, srv.URL, nil, "selected")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer handle.close()
-	data, err := io.ReadAll(handle.response.Body)
-	if err != nil || route.Endpoint != "responses" || !strings.Contains(string(data), "response.completed") {
-		t.Fatalf("route: %v, body: %s, error: %v", route, data, err)
-	}
-	if len(keys) != 2 || keys[0] != "Bearer selected" || keys[1] != keys[0] {
-		t.Fatalf("credentials changed: %v", keys)
 	}
 }
 

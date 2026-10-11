@@ -21,34 +21,23 @@ func (e *upstreamError) Error() string {
 	return fmt.Sprintf("zen upstream status %d: %s", e.status, e.message)
 }
 
-func selectUpstream(ctx context.Context, req executorRequest, cfg pluginConfig, route modelRoute, baseURL string, headers map[string][]string, key string) (*hostStreamHandle, modelRoute, error) {
-	endpoints := candidateEndpoints(cfg, route)
-	for i, endpoint := range endpoints {
-		route.Endpoint = endpoint
-		body, err := prepareUpstreamBody(req, route)
-		if err != nil {
-			return nil, route, err
-		}
-		handle, err := openUpstream(ctx, req.HostCallbackID, proxyForRequest(req), http.MethodPost, baseURL+route.EndpointPath(), headers, key, body)
-		if err != nil {
-			return nil, route, err
-		}
-		if handle.StatusCode >= 200 && handle.StatusCode < 300 {
-			if i > 0 {
-				rememberEndpoint(route.Model, endpoint)
-			}
-			return handle, route, nil
-		}
-		data, _, _, readErr := readUpstreamResponse(handle)
-		if readErr != nil {
-			return nil, route, readErr
-		}
-		if isEndpointMismatch(handle.StatusCode) && i+1 < len(endpoints) {
-			continue
-		}
-		return nil, route, &upstreamError{status: handle.StatusCode, message: truncate(data, 512), raw: string(data)}
+func selectUpstream(ctx context.Context, req executorRequest, route modelRoute, baseURL string, headers map[string][]string, key string) (*hostStreamHandle, modelRoute, error) {
+	body, err := prepareUpstreamBody(req, route)
+	if err != nil {
+		return nil, route, err
 	}
-	return nil, route, fmt.Errorf("zen upstream: no endpoint attempted")
+	handle, err := openUpstream(ctx, req.HostCallbackID, proxyForRequest(req), http.MethodPost, baseURL+route.EndpointPath(), headers, key, body)
+	if err != nil {
+		return nil, route, err
+	}
+	if handle.StatusCode >= 200 && handle.StatusCode < 300 {
+		return handle, route, nil
+	}
+	data, _, _, err := readUpstreamResponse(handle)
+	if err != nil {
+		return nil, route, err
+	}
+	return nil, route, &upstreamError{status: handle.StatusCode, message: truncate(data, 512), raw: string(data)}
 }
 
 func proxyForRequest(req executorRequest) string {

@@ -482,29 +482,6 @@ func inferEndpoint(model string) string {
 	return "chat"
 }
 
-// learnedEndpoints records upstream endpoints discovered by retrying a
-// failed chat request against /responses (models zen only serves there).
-var learnedEndpoints struct {
-	mu sync.RWMutex
-	m  map[string]string
-}
-
-func rememberEndpoint(model, endpoint string) {
-	learnedEndpoints.mu.Lock()
-	defer learnedEndpoints.mu.Unlock()
-	if learnedEndpoints.m == nil {
-		learnedEndpoints.m = map[string]string{}
-	}
-	learnedEndpoints.m[strings.ToLower(strings.TrimSpace(model))] = endpoint
-}
-
-func learnedEndpoint(model string) (string, bool) {
-	learnedEndpoints.mu.RLock()
-	defer learnedEndpoints.mu.RUnlock()
-	ep, ok := learnedEndpoints.m[strings.ToLower(strings.TrimSpace(model))]
-	return ep, ok
-}
-
 // endpointUnsupported marks models whose upstream endpoint speaks a dialect
 // this plugin cannot translate (Anthropic Messages, Jev's /systemone, the
 // AI-SDK Gemini path). Requests to such models are refused up front instead
@@ -574,34 +551,9 @@ var officialZenEndpointModels = map[string]string{
 	"qwen3.5-plus":  endpointUnsupported,
 }
 
-// candidateEndpoints returns the endpoints to attempt for a request, in
-// order. Explicit configuration pins a single endpoint; otherwise the
-// opposite dialect is tried once after a path-level failure so endpoint
-// hints that drift from reality self-correct.
-func candidateEndpoints(cfg pluginConfig, route modelRoute) []string {
-	first := "chat"
-	if route.Endpoint == "responses" {
-		first = "responses"
-	}
-	if routeConfigured(cfg, route.Model) {
-		return []string{first}
-	}
-	second := "chat"
-	if first == "chat" {
-		second = "responses"
-	}
-	return []string{first, second}
-}
-
-// isEndpointMismatch reports whether an upstream status looks like "wrong
-// path for this model" rather than a request we should never repeat.
-func isEndpointMismatch(status int) bool {
-	return status == 400 || status == 404 || status == 405
-}
-
 // routeConfigured reports whether the model has an explicit entry in plugin
 // config *with a pinned endpoint*; only then is the endpoint authoritative
-// (learned endpoints and dialect retries never override it). An entry
+// configuration takes precedence over catalog metadata. An entry
 // without an endpoint (e.g. configured just for alias/capabilities) still
 // gets inference and retries.
 func routeConfigured(cfg pluginConfig, model string) bool {
@@ -616,8 +568,7 @@ func routeConfigured(cfg pluginConfig, model string) bool {
 }
 
 // routeForModel resolves the route for a requested model id.
-// Endpoint resolution order: explicit config endpoint > endpoint learned
-// from a live retry > official endpoint table > name inference.
+// Endpoint resolution order: explicit configuration > catalog metadata > legacy hints.
 func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 	model = strings.TrimSpace(model)
 	if cfg.ModelPrefix != "" {
@@ -655,9 +606,6 @@ func resolveEndpoint(model string) string {
 	discoveredModels.mu.RUnlock()
 	if found {
 		return metadata.Endpoint
-	}
-	if ep, ok := learnedEndpoint(model); ok {
-		return ep
 	}
 	if ep, known := officialZenEndpoint(model); known {
 		return ep
@@ -1371,7 +1319,7 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	headers := gateHeaders(req)
 
 	if !stream {
-		return executeNonStream(req, cfg, route, baseURL, headers, apiKey)
+		return executeNonStream(req, route, baseURL, headers, apiKey)
 	}
 
 	streamID := strings.TrimSpace(req.StreamID)
@@ -1382,7 +1330,7 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, usedRoute, err := selectUpstream(ctx, req, cfg, route, baseURL, headers, apiKey)
+	resp, usedRoute, err := selectUpstream(ctx, req, route, baseURL, headers, apiKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1392,59 +1340,31 @@ func execute(payload []byte, stream bool) ([]byte, error) {
 	})
 }
 
-// executeNonStream streams from zen and folds the SSE answer into one JSON
-// payload. Without an explicitly configured endpoint, a path-level failure
-// (400/404/405) on the first candidate dialect is retried once against the
-// opposite endpoint and the winner is remembered.
-func executeNonStream(req executorRequest, cfg pluginConfig, route modelRoute, baseURL string, headers map[string][]string, apiKey string) ([]byte, error) {
+// executeNonStream folds the selected upstream protocol's SSE into a completion.
+func executeNonStream(req executorRequest, route modelRoute, baseURL string, headers map[string][]string, apiKey string) ([]byte, error) {
 	ctx, err := executionContext(req)
 	if err != nil {
 		return nil, err
 	}
-	endpoints := candidateEndpoints(cfg, route)
-	var lastErr error
-	run := func(key string, hdrs map[string][]string) ([]byte, error) {
-		for _, ep := range endpoints {
-			r := route
-			r.Endpoint = ep
-			// Gate rule 4: zen only answers streaming requests; the SSE answer
-			// is folded below.
-			upstreamBody, err := prepareUpstreamBody(req, r)
-			if err != nil {
-				return nil, err
-			}
-			body, respHeaders, status, err := requestUpstream(ctx, req.HostCallbackID, proxyForRequest(req), http.MethodPost, baseURL+r.EndpointPath(), hdrs, key, upstreamBody)
-			if err != nil {
-				return nil, err
-			}
-			if status < 200 || status >= 300 {
-				lastErr = &upstreamError{status: status, message: truncate(body, 512)}
-				if isEndpointMismatch(status) && ep == endpoints[0] && len(endpoints) > 1 {
-					continue // model may only be served on the other endpoint
-				}
-				return nil, lastErr
-			}
-			if ep != endpoints[0] {
-				rememberEndpoint(route.Model, ep)
-			}
-			folded, err := foldSSEToJSON(body, ep)
-			if err != nil {
-				return nil, err
-			}
-			if ep == "responses" {
-				// The plugin declares chat-completions output, so the folded
-				// responses object must become a chat.completion before the host
-				// translates it for the requesting client.
-				folded, err = responsesCompletionToChat(folded, req.Model)
-				if err != nil {
-					return nil, err
-				}
-			}
-			return okEnvelopeJSON(executorResponse{Payload: folded, Headers: respHeaders})
-		}
-		return nil, lastErr
+	response, usedRoute, err := selectUpstream(ctx, req, route, baseURL, headers, apiKey)
+	if err != nil {
+		return nil, err
 	}
-	return run(apiKey, headers)
+	body, respHeaders, _, err := readUpstreamResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	folded, err := foldSSEToJSON(body, usedRoute.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if usedRoute.Endpoint == "responses" {
+		folded, err = responsesCompletionToChat(folded, req.Model)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return okEnvelopeJSON(executorResponse{Payload: folded, Headers: respHeaders})
 }
 
 // apiKeyForRequest resolves the zen API key for an executor request. It

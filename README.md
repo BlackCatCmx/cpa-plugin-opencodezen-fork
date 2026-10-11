@@ -22,7 +22,7 @@
    - OpenCode Zen 的官方文档（[端点表](https://opencode.ai/docs/zh-cn/zen/#端点)）列明每个模型由 `/responses`、`/chat/completions` 或非 OpenAI 方言（`/messages`、`/systemone`）提供服务；`/models` 接口本身不返回端点字段。
    - 模型 ID 从上游 `/models` 拉取，价格、SDK 和能力参数来自 `https://models.opencode.ai/api.json`，官方 Zen Markdown 端点表补充或修正协议。仅自动注册当前上游列表中免费且支持 Chat Completions 或 Responses 的模型，不固定追加内置模型。
    - 官方目录中的输入、输出和缓存价格均为零时判为免费，不要求模型名包含 `free`；目录缺少完整价格时才按 `-free` 后缀判断。官方目录未知的模型不会自动注册，可通过自定义 `models` 指定模型及协议。既有名称规则只用于目录未覆盖的手动配置模型。
-   - 未显式配置端点时，请求遇 400/404/405 自动换另一方言重试并记住结果，配置里显式写的 `endpoint` 永远优先。
+   - 配置里显式写的 `endpoint` 优先于官方目录。测试、正式流式和非流式调用均按确定的协议发送一次请求；失败保留该次上游错误，不自动切换协议。
 
 2. **免费层门禁自动伪装（FreeTier Gate）**：
    - Zen 服务端对未通过官方 CLI 发起的请求有严格的校验（检查 `ses_` / `msg_` 规范格式会话头、客户端特征头 `cli`、`bash`/`read` 工具集、强制 `stream: true` 等），缺一不可，否则返回 `403 FreeTierError` 并封禁 Key 约 15 分钟。
@@ -125,10 +125,9 @@ https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/r
 ```
 
 > **说明**：
-> - 插件默认已注册以下免费模型：`mimo-v2.6-flash-free`、`mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`nemotron-3-ultra-free`、`muse-spark-1.3-contributor-free`。
-> - 插件会自动从 zen `/models` 接口发现新的免费模型（`*-free` 后缀，10 分钟缓存）并注册，无需重新编译；不想用的模型可用 `exclude-models` 排除。
+> - 插件从 Zen `/models` 与官方目录合并发现免费模型，按价格判断，不要求 ID 包含 `free`。缓存有效期为 10 分钟，也可在面板手动拉取；不想用的模型可用 `exclude-models` 排除。
 > - 也可以在凭证 JSON 文件中添加 `"models": [{"name": "新模型名"}]` 手动指定。
-> - 端点（chat / responses）自动识别：优先查内置官方端点表（文档快照 2026-10-01），未知模型按名称推断；未显式配置 `endpoint` 时，请求遇 400/404/405 自动换另一方言重试并记住。
+> - 端点（chat / responses）优先使用手动配置，否则使用官方目录与端点表；目录未覆盖的手动模型使用既有名称规则。失败不自动改用另一种协议。
 
 ### 3. 模型能力元数据（上下文窗口等）
 
