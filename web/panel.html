@@ -38,11 +38,13 @@
     .notice.success { background: var(--green-bg); color: var(--green); }
     .workspace { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
     .toolbar { padding: 16px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-    .search { display: flex; align-items: center; gap: 9px; min-width: 210px; max-width: 420px; flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 0 11px; color: var(--muted); background: var(--bg); }
+    .search { display: flex; align-items: center; gap: 9px; min-width: 180px; max-width: 260px; flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 0 11px; color: var(--muted); background: var(--bg); }
     .search:focus-within { border-color: var(--focus); }
     .search input { width: 100%; border: 0; outline: 0; padding: 9px 0; color: var(--text); background: transparent; }
     select { min-height: 36px; padding: 7px 30px 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
     .summary { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .test-model-controls { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+    #test-model { width: 220px; text-overflow: ellipsis; }
     .settings-scroll { overflow-x: auto; margin-bottom: 16px; }
     .plugin-settings { display: flex; align-items: center; gap: 10px; min-width: 640px; }
     .plugin-settings label { font-size: 13px; font-weight: 550; white-space: nowrap; flex: none; }
@@ -137,6 +139,7 @@
     <div class="toolbar">
       <label class="search"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg><input id="search" type="search" aria-label="搜索 Key 或代理" placeholder="搜索 Key 或代理" autocomplete="off"></label>
       <select id="status-filter" aria-label="筛选状态"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select>
+      <div class="test-model-controls"><label for="test-model">测试模型</label><select id="test-model" form="settings-form"><option value="">请拉取并选择模型</option></select><button id="pull-models" class="btn compact" type="button" data-mutation>拉取模型</button></div>
       <span id="summary" class="summary">正在加载…</span>
     </div>
     <div class="table-scroll"><table id="key-table" hidden>

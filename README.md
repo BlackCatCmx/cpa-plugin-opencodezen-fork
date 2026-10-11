@@ -20,8 +20,9 @@
 
 1. **端点路由自动分流（Endpoint Split）**：
    - OpenCode Zen 的官方文档（[端点表](https://opencode.ai/docs/zh-cn/zen/#端点)）列明每个模型由 `/responses`、`/chat/completions` 或非 OpenAI 方言（`/messages`、`/systemone`）提供服务；`/models` 接口本身不返回端点字段。
-   - 插件内置官方端点表快照（按模型家族分类，2026-10-01）：`gpt-`/`grok-`/`muse-` 走 `/responses`，免费系（`mimo-`/`longcat-`/`deepseek-`/`glm-` 等）走 `/chat/completions`；claude/qwen3.7/gemini/jev 等非 OpenAI 方言模型不会被注册（选中也无法工作）。
-   - 端点表只是提示：未知模型按名称推断；未显式配置端点时，请求遇 400/404/405 自动换另一方言重试并记住结果，配置里显式写的 `endpoint` 永远优先。
+   - 模型 ID 从上游 `/models` 拉取，价格、SDK 和能力参数来自 `https://models.opencode.ai/api.json`，官方 Zen Markdown 端点表补充或修正协议。仅自动注册当前上游列表中免费且支持 Chat Completions 或 Responses 的模型，不固定追加内置模型。
+   - 官方目录中的输入、输出和缓存价格均为零时判为免费，不要求模型名包含 `free`；目录缺少完整价格时才按 `-free` 后缀判断。官方目录未知的模型不会自动注册，可通过自定义 `models` 指定模型及协议。既有名称规则只用于目录未覆盖的手动配置模型。
+   - 未显式配置端点时，请求遇 400/404/405 自动换另一方言重试并记住结果，配置里显式写的 `endpoint` 永远优先。
 
 2. **免费层门禁自动伪装（FreeTier Gate）**：
    - Zen 服务端对未通过官方 CLI 发起的请求有严格的校验（检查 `ses_` / `msg_` 规范格式会话头、客户端特征头 `cli`、`bash`/`read` 工具集、强制 `stream: true` 等），缺一不可，否则返回 `403 FreeTierError` 并封禁 Key 约 15 分钟。
@@ -94,7 +95,9 @@ https://raw.githubusercontent.com/BlackCatCmx/cpa-plugin-opencodezen-fork/main/r
 
 已有凭据会直接显示在页面中。原来的插件配置 `api-keys` 仍可用于导入 Key，已有凭据不会因重新配置而被覆盖；从面板编辑或删除导入的 Key 时，会同步移除其旧导入配置。
 
-每行“操作”中的 **测试** 按钮使用插件统一服务地址和该行 Key、代理发送 `Reply with OK, nothing else.`，收到有效文本回答才显示成功，并显示耗时；成功或错误显示在“结果”栏，悬停可查看详情，超时为 30 秒。默认测试 `mimo-v2.6-flash-free`；配置了自定义模型列表时，测试其中第一个模型。测试不轮换 Key、不改代理、不改变凭据启停或冷却状态，仅验证本次所选模型的调用。
+页面提供 **拉取模型** 按钮，使用首个已启用 Zen Key 的代理策略获取上游列表、官方 JSON 目录和 Markdown 端点表。成功后替换缓存并通过 CPA 配置重载更新模型注册；失败明确提示并保留原缓存。自动发现的缓存有效期为 10 分钟，在宿主请求模型列表或解析凭据时检查；配置自定义 `models` 时仍只注册自定义列表，拉取可更新其协议和能力元数据。修改服务地址会清空缓存。
+
+在 **测试模型** 下拉框中选择模型后，点击上方 **保存**，设置保存在 `plugins.configs.zen.test-model`。未选择模型时不会发送测试请求，也不默认选择内置模型。每行“操作”中的 **测试** 按钮使用插件统一服务地址和该行 Key、代理发送 `Reply with OK, nothing else.`，收到有效文本回答才显示成功，并显示耗时；成功或错误显示在“结果”栏，悬停可查看实际模型、协议、端点和回答，失败时附带脱敏的原始响应。超时为 30 秒。测试不轮换 Key、不改代理、不改变凭据启停或冷却状态，仅验证本次所选模型的调用。
 
 页面顶部的“插件模型前缀”统一控制本插件全部模型，默认是 `opencode`，可改写或清空后保存。该设置保存在 `plugins.configs.zen.model-prefix`，不写入 Key 凭据。默认注册的调用名称如 `opencode/mimo-v2.6-flash-free`，不额外注册无前缀名称；清空后注册原始名称。插件发送上游请求时恢复原始模型名，自定义模型别名和自动发现的模型同样遵循此设置。
 

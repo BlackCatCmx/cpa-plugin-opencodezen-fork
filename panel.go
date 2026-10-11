@@ -15,6 +15,8 @@ var panelFiles embed.FS
 func panelRegistration() ([]byte, error) {
 	return okEnvelopeJSON(map[string]any{"routes": []map[string]string{
 		{"Method": "POST", "Path": "/plugins/zen/test"},
+		{"Method": "GET", "Path": "/plugins/zen/models"},
+		{"Method": "POST", "Path": "/plugins/zen/models/refresh"},
 	}, "resources": []map[string]string{
 		{"Path": "/panel", "Menu": "OpenCode Zen", "Description": "管理 Zen Key 和独立代理"},
 		{"Path": "/panel.mjs"},
@@ -34,6 +36,17 @@ func handlePanel(payload []byte) ([]byte, error) {
 	var body []byte
 	resource := strings.TrimPrefix(req.Path, "/v0/resource/plugins/"+pluginID)
 	switch {
+	case req.Path == "/v0/management/plugins/zen/models" && req.Method == "GET":
+		contentType = "application/json; charset=utf-8"
+		body, _ = json.Marshal(panelModels())
+	case req.Path == "/v0/management/plugins/zen/models/refresh" && req.Method == "POST":
+		contentType = "application/json; charset=utf-8"
+		if err := refreshModelsFromHost(loadedConfig(), req.HostCallbackID, true); err != nil {
+			status = 400
+			body, _ = json.Marshal(map[string]any{"error": err.Error()})
+		} else {
+			body, _ = json.Marshal(panelModels())
+		}
 	case req.Path == "/v0/management/plugins/zen/test" && req.Method == "POST":
 		contentType = "application/json; charset=utf-8"
 		result, err := testCredential(req.Body, req.HostCallbackID)
@@ -103,9 +116,9 @@ func testCredential(body []byte, callbackID string) (map[string]any, error) {
 	if key == "" {
 		return nil, fmt.Errorf("凭据缺少 API Key")
 	}
-	model := defaultZenModels[0].Model
-	if len(cfg.Models) > 0 {
-		model = cfg.Models[0].Model
+	model := cfg.TestModel
+	if model == "" {
+		return nil, fmt.Errorf("请先选择并保存测试模型")
 	}
 	route, _ := routeForModel(cfg, model)
 	if endpoint, known := officialZenEndpoint(route.Model); known && endpoint == endpointUnsupported && !routeConfigured(cfg, route.Model) {
@@ -122,10 +135,13 @@ func testCredential(body []byte, callbackID string) (map[string]any, error) {
 	started := time.Now()
 	result := map[string]any{"ok": false, "model": model}
 	response, usedRoute, err := selectUpstream(ctx, req, cfg, route, cfg.BaseURL, gateHeaders(req), key)
+	result["protocol"], result["endpoint"] = usedRoute.Endpoint, cfg.BaseURL+usedRoute.EndpointPath()
+	var rawResponse []byte
 	if err == nil {
 		result["http_status"] = response.StatusCode
 		var data []byte
 		data, _, _, err = readUpstreamResponse(response)
+		rawResponse = data
 		if err == nil {
 			data, err = foldSSEToJSON(data, usedRoute.Endpoint)
 		}
@@ -150,12 +166,20 @@ func testCredential(body []byte, callbackID string) (map[string]any, error) {
 	if err != nil {
 		if upstream, ok := err.(*upstreamError); ok {
 			result["http_status"] = upstream.status
+			rawResponse = []byte(upstream.raw)
 		}
 		message := strings.ReplaceAll(err.Error(), key, "[redacted]")
 		if proxy := proxyForRequest(req); proxy != "" {
 			message = strings.ReplaceAll(message, proxy, "[proxy]")
 		}
 		result["error"] = message
+		if len(rawResponse) > 0 {
+			detail := strings.ReplaceAll(string(rawResponse), key, "[redacted]")
+			if proxy := proxyForRequest(req); proxy != "" {
+				detail = strings.ReplaceAll(detail, proxy, "[proxy]")
+			}
+			result["raw"] = detail
+		}
 	}
 	return result, nil
 }

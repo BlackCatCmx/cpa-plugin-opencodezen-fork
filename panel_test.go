@@ -11,6 +11,20 @@ import (
 	"time"
 )
 
+func mockDiscoveryCatalog(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/catalog" {
+			io.WriteString(w, `{"opencode":{"npm":"@ai-sdk/openai-compatible","models":{"new-free":{"cost":{"input":0,"output":0}}}}}`)
+		} else {
+			io.WriteString(w, "| New | new-free | `https://opencode.ai/zen/v1/chat/completions` |")
+		}
+	}))
+	originalCatalog, originalDocs := catalogURL, endpointDocsURL
+	catalogURL, endpointDocsURL = server.URL+"/catalog", server.URL+"/docs"
+	t.Cleanup(func() { catalogURL, endpointDocsURL = originalCatalog, originalDocs; server.Close() })
+}
+
 func TestPanelCredentialTest(t *testing.T) {
 	for _, tc := range []struct {
 		name, endpoint, answer string
@@ -21,6 +35,8 @@ func TestPanelCredentialTest(t *testing.T) {
 		{"responses", "responses", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\"}]}]}}\n\n", 200, true},
 		{"rejected", "chat", "selected-secret was rejected", 401, false},
 		{"empty", "chat", "data: [DONE]\n\n", 200, false},
+		{"unrecognized-body", "chat", `{"unexpected":"changed format"}`, 200, false},
+		{"long-error", "chat", strings.Repeat("x", 40000) + "selected-secret detail-at-end", 429, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -46,6 +62,7 @@ func TestPanelCredentialTest(t *testing.T) {
 			defer proxy.Close()
 			cfg := defaultPluginConfig()
 			cfg.BaseURL = "http://zen.invalid"
+			cfg.TestModel = "test-free"
 			cfg.Models = []modelRoute{{Model: "test-free", Alias: "test-free", Endpoint: tc.endpoint}}
 			resetConfig(t, cfg)
 			original := credentialHost
@@ -68,6 +85,15 @@ func TestPanelCredentialTest(t *testing.T) {
 			}
 			if tc.usable && result["reply"] != "OK" {
 				t.Fatalf("reply = %v", result["reply"])
+			}
+			if result["protocol"] != tc.endpoint || result["endpoint"] != "http://zen.invalid"+(modelRoute{Endpoint: tc.endpoint}).EndpointPath() {
+				t.Fatalf("route details = %v", result)
+			}
+			if !tc.usable && result["raw"] == nil {
+				t.Fatalf("missing raw diagnostic: %v", result)
+			}
+			if tc.name == "long-error" && !strings.Contains(result["raw"].(string), "detail-at-end") {
+				t.Fatal("error body was only partially read")
 			}
 			encoded, _ := json.Marshal(result)
 			if strings.Contains(string(encoded), "selected-secret") {
@@ -144,7 +170,7 @@ func TestPluginModelPrefix(t *testing.T) {
 	}
 }
 
-func TestPluginPrefixCoversDefaultAndDiscoveredModels(t *testing.T) {
+func TestPluginPrefixCoversDiscoveredModels(t *testing.T) {
 	discoveredModels.mu.Lock()
 	previousIDs, previousTime := discoveredModels.ids, discoveredModels.fetchedAt
 	discoveredModels.ids, discoveredModels.fetchedAt = []string{"new-test-free"}, time.Now()
@@ -163,7 +189,7 @@ func TestPluginPrefixCoversDefaultAndDiscoveredModels(t *testing.T) {
 	if err := json.Unmarshal(response, &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Result.Models) != len(defaultZenModels)+1 {
+	if len(result.Result.Models) != 1 {
 		t.Fatalf("models = %v", result.Result.Models)
 	}
 	for _, model := range result.Result.Models {
@@ -207,6 +233,7 @@ func TestPanelProxyFailure(t *testing.T) {
 	defer server.Close()
 	cfg := defaultPluginConfig()
 	cfg.BaseURL = server.URL
+	cfg.TestModel = "test-free"
 	resetConfig(t, cfg)
 	original := credentialHost
 	credentialHost = func(method string, _ any) (json.RawMessage, error) {
@@ -223,6 +250,7 @@ func TestPanelProxyFailure(t *testing.T) {
 }
 
 func TestPluginServiceAddressDiscovery(t *testing.T) {
+	mockDiscoveryCatalog(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer selected" {
 			t.Errorf("wrong discovery request: %s", r.URL)

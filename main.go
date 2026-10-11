@@ -148,6 +148,7 @@ type pluginConfig struct {
 	Project        string
 	Models         []modelRoute
 	ModelPrefix    string
+	TestModel      string
 	MaxBufferBytes int64
 }
 
@@ -200,6 +201,11 @@ func configure(raw []byte) error {
 					return fmt.Errorf("base-url must be a string")
 				}
 			}
+			if value, exists := node["test-model"]; exists {
+				if _, ok := value.(string); !ok {
+					return fmt.Errorf("test-model must be a string")
+				}
+			}
 			if value, exists := node["model-prefix"]; exists {
 				if _, ok := value.(string); !ok {
 					return fmt.Errorf("model-prefix must be a string")
@@ -233,6 +239,7 @@ func configure(raw []byte) error {
 		cfg.Project = "global"
 	}
 	cfg.APIKeys = trimNonEmpty(cfg.APIKeys)
+	cfg.TestModel = strings.TrimSpace(cfg.TestModel)
 	cfg.ModelPrefix = strings.TrimSpace(cfg.ModelPrefix)
 	if strings.Contains(cfg.ModelPrefix, "/") || strings.ContainsFunc(cfg.ModelPrefix, unicode.IsSpace) {
 		return fmt.Errorf("model-prefix cannot contain slashes or whitespace")
@@ -243,8 +250,8 @@ func configure(raw []byte) error {
 		m.Model = strings.TrimSpace(m.Model)
 		m.Alias = strings.TrimSpace(m.Alias)
 		m.Endpoint = strings.ToLower(strings.TrimSpace(m.Endpoint))
-		if m.Endpoint != "responses" {
-			m.Endpoint = "chat"
+		if m.Endpoint != "" && m.Endpoint != "chat" && m.Endpoint != "responses" {
+			return fmt.Errorf("model endpoint must be chat or responses")
 		}
 		if m.Alias == "" {
 			m.Alias = m.Model
@@ -257,7 +264,8 @@ func configure(raw []byte) error {
 	storeConfig(cfg)
 	if previousBase != cfg.BaseURL {
 		discoveredModels.mu.Lock()
-		discoveredModels.ids, discoveredModels.fetchedAt = nil, time.Time{}
+		discoveredModels.ids, discoveredModels.metadata, discoveredModels.fetchedAt = nil, nil, time.Time{}
+		discoveredModels.lastError = ""
 		discoveredModels.mu.Unlock()
 	}
 	return nil
@@ -330,6 +338,9 @@ func applyConfigNode(cfg *pluginConfig, node map[string]any) {
 	}
 	if v, ok := node["provider"].(string); ok {
 		cfg.Provider = v
+	}
+	if v, ok := node["test-model"].(string); ok {
+		cfg.TestModel = v
 	}
 	if v, ok := node["model-prefix"].(string); ok {
 		cfg.ModelPrefix = v
@@ -500,23 +511,15 @@ func learnedEndpoint(model string) (string, bool) {
 // of being posted to a wrong path.
 const endpointUnsupported = "unsupported"
 
-// officialZenEndpoint classifies a model by its upstream endpoint per the
-// official OpenCode Zen docs endpoint table
-// (https://opencode.ai/docs/zh-cn/zen/#端点), snapshotted 2026-10-01.
-//
-// The table is a routing *hint*, never a source of truth:
-//   - model existence still comes from live /models discovery; the /models
-//     payload carries no endpoint field, so the docs are the only
-//     machine-usable source of endpoint data;
-//   - classification prefers family prefixes over per-model rows so
-//     undocumented ids (deepseek-v4-flash-free, muse-spark-1.2-...) and
-//     docs churn still classify correctly;
-//   - execute()/runStream() retry the opposite dialect on a path-level
-//     failure (400/404/405) unless the route is explicitly configured, so
-//     a stale entry self-corrects at runtime;
-//   - an explicit plugins.configs.zen models entry with an endpoint always
-//     wins, which is the escape hatch for any misclassification.
+// officialZenEndpoint prefers live catalog metadata. Legacy hints are used
+// only for manually configured models absent from the live catalog.
 func officialZenEndpoint(model string) (string, bool) {
+	discoveredModels.mu.RLock()
+	metadata, found := discoveredModels.metadata[model]
+	discoveredModels.mu.RUnlock()
+	if found {
+		return metadata.Endpoint, true
+	}
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return "", false
@@ -639,7 +642,7 @@ func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 		// Entry pins the upstream name/alias but not the endpoint: resolve
 		// the endpoint as if the model were unconfigured.
 		r := *configured
-		r.Endpoint = resolveEndpoint(model)
+		r.Endpoint = resolveEndpoint(r.Model)
 		return r, true
 	}
 	return modelRoute{Model: model, Alias: model, Endpoint: resolveEndpoint(model)}, true
@@ -647,10 +650,16 @@ func routeForModel(cfg pluginConfig, model string) (modelRoute, bool) {
 
 // resolveEndpoint picks the best endpoint hint for an unconfigured model.
 func resolveEndpoint(model string) string {
+	discoveredModels.mu.RLock()
+	metadata, found := discoveredModels.metadata[model]
+	discoveredModels.mu.RUnlock()
+	if found {
+		return metadata.Endpoint
+	}
 	if ep, ok := learnedEndpoint(model); ok {
 		return ep
 	}
-	if ep, known := officialZenEndpoint(model); known && ep != endpointUnsupported {
+	if ep, known := officialZenEndpoint(model); known {
 		return ep
 	}
 	return inferEndpoint(model)
@@ -873,6 +882,7 @@ func handleMethod(method string, payload []byte) ([]byte, error) {
 				ConfigFields: []any{
 					map[string]any{"Name": "enabled", "Type": "boolean", "Description": "Enable the zen provider plugin."},
 					map[string]any{"Name": "model-prefix", "Type": "string", "Description": "Prefix for all Zen model IDs; default opencode, empty disables the prefix."},
+					map[string]any{"Name": "test-model", "Type": "string", "Description": "Model used by the panel test button."},
 					map[string]any{"Name": "base-url", "Type": "string", "Description": "Service address for all Zen credentials; default https://opencode.ai/zen/v1."},
 					map[string]any{"Name": "api-keys", "Type": "string", "Description": "OpenCode zen API keys (comma-separated). Each key becomes a virtual zen credential; alternatively drop key files into the auth directory."},
 					map[string]any{"Name": "exclude-models", "Type": "string", "Description": "Model IDs (comma-separated) to exclude from the models auto-discovered from the zen /models endpoint."},
@@ -1106,15 +1116,6 @@ func sha256Prefix(key string) string {
 // model registration
 // ---------------------------------------------------------------------------
 
-// defaultZenModels announces the free-tier Zen models supported out of the box.
-var defaultZenModels = []modelRoute{
-	{Model: "mimo-v2.6-flash-free", Alias: "mimo-v2.6-flash-free", Endpoint: "chat"},
-	{Model: "mimo-v2.5-free", Alias: "mimo-v2.5-free", Endpoint: "chat"},
-	{Model: "ling-3.0-flash-fin-free", Alias: "ling-3.0-flash-fin-free", Endpoint: "chat"},
-	{Model: "nemotron-3-ultra-free", Alias: "nemotron-3-ultra-free", Endpoint: "chat"},
-	{Model: "muse-spark-1.3-contributor-free", Alias: "muse-spark-1.3-contributor-free", Endpoint: "responses"},
-}
-
 // defaultModelCapabilities announces built-in capability metadata for the
 // Zen free-tier models. Values are aligned with the OpenCode client's own
 // model catalog (models.dev, "opencode" provider — the catalog OpenCode
@@ -1143,15 +1144,19 @@ var defaultModelCapabilities = map[string]modelCapabilities{
 	"deepseek-v4-flash-free":          {ContextLength: 200000, MaxCompletionTokens: 128000, ReasoningLevels: []string{"low", "high", "max"}, DisplayName: "DeepSeek V4 Flash Free"},
 }
 
-// zenModelSpec looks up the built-in capability table for a model.
+// zenModelSpec prefers live capabilities, with existing hints for manual models.
 func zenModelSpec(model string) (modelCapabilities, bool) {
+	discoveredModels.mu.RLock()
+	metadata, found := discoveredModels.metadata[model]
+	discoveredModels.mu.RUnlock()
+	if found {
+		return metadata.Capabilities, true
+	}
 	caps, ok := defaultModelCapabilities[strings.ToLower(strings.TrimSpace(model))]
 	return caps, ok
 }
 
-// resolveModelCapabilities merges built-in defaults with explicit route
-// configuration; explicit values win. Known models always announce thinking
-// support (all free-tier models reason); effort-type models list their levels.
+// resolveModelCapabilities merges catalog metadata with explicit route settings.
 func resolveModelCapabilities(m modelRoute) modelCapabilities {
 	caps, _ := zenModelSpec(m.Model)
 	if m.ContextLength > 0 {
@@ -1166,7 +1171,7 @@ func resolveModelCapabilities(m modelRoute) modelCapabilities {
 	if len(m.ReasoningLevels) > 0 {
 		caps.ReasoningLevels = m.ReasoningLevels
 	}
-	if _, known := zenModelSpec(m.Model); known || len(m.ReasoningLevels) > 0 {
+	if len(caps.ReasoningLevels) > 0 {
 		caps.Thinking = &thinkingSupport{
 			ZeroAllowed:    true,
 			DynamicAllowed: true,
@@ -1176,57 +1181,39 @@ func resolveModelCapabilities(m modelRoute) modelCapabilities {
 	return caps
 }
 
-// discoveredZenModels returns the cached free-tier model IDs fetched from
-// the zen /models endpoint, refreshing synchronously (at most once per TTL)
-// when a key is known. Discovery failures silently fall back to the cache.
+// Discovery failures preserve the previous cache and expose the error to the panel.
 var discoveredModels struct {
 	mu        sync.RWMutex
+	refreshMu sync.Mutex
 	ids       []string
 	fetchedAt time.Time
+	metadata  map[string]modelMetadata
+	lastError string
 }
 
-// fetchZenModels lists free-tier model IDs from the zen /models endpoint.
-// Discovery uses the same credential proxy policy as execution.
-func fetchZenModels(baseURL, apiKey, proxyURL string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	handle, err := openUpstream(ctx, "", proxyURL, http.MethodGet, baseURL+"/models", nil, apiKey, nil)
+// fetchZenModels reads the upstream list without filtering model IDs.
+func fetchZenModels(ctx context.Context, callbackID, baseURL, apiKey, proxyURL string) ([]string, error) {
+	data, _, status, err := requestUpstream(ctx, callbackID, proxyURL, http.MethodGet, baseURL+"/models", nil, apiKey, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer handle.close()
-	var buffer bytes.Buffer
-	for {
-		chunk, err := handle.read()
-		if err != nil {
-			return nil, err
-		}
-		if chunk.Error != "" {
-			return nil, fmt.Errorf("zen model discovery: %s", chunk.Error)
-		}
-		if buffer.Len()+len(chunk.Payload) > 1<<20 {
-			return nil, fmt.Errorf("zen model discovery response exceeds 1 MiB")
-		}
-		buffer.Write(chunk.Payload)
-		if chunk.Done {
-			break
-		}
-	}
-	body, status := buffer.Bytes(), handle.StatusCode
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("zen /models status %d: %s", status, truncate(body, 256))
+	if status/100 != 2 {
+		return nil, fmt.Errorf("上游模型列表 HTTP %d: %s", status, truncate(data, 512))
 	}
 	var list struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, err
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, fmt.Errorf("上游模型列表解析失败: %w", err)
+	}
+	if len(list.Data) == 0 {
+		return nil, fmt.Errorf("上游返回空模型列表")
 	}
 	ids := make([]string, 0, len(list.Data))
-	for _, m := range list.Data {
-		if id := strings.TrimSpace(m.ID); id != "" && strings.HasSuffix(strings.ToLower(id), "-free") {
+	for _, model := range list.Data {
+		if id := strings.TrimSpace(model.ID); id != "" {
 			ids = append(ids, id)
 		}
 	}
@@ -1235,18 +1222,19 @@ func fetchZenModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 
 // refreshDiscoveredModels updates the discovery cache (best effort).
 func refreshDiscoveredModels(baseURL, apiKey, proxyURL string) {
-	ids, err := fetchZenModels(baseURL, apiKey, proxyURL)
+	err := pullModels(baseURL, apiKey, proxyURL, "", false)
 	if err != nil {
-		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": strings.ReplaceAll(err.Error(), apiKey, "[redacted]")}})
-		return
-	}
-	discoveredModels.mu.Lock()
-	if baseURL != loadedConfig().BaseURL {
+		message := strings.ReplaceAll(err.Error(), apiKey, "[redacted]")
+		if proxyURL != "" {
+			message = strings.ReplaceAll(message, proxyURL, "[proxy]")
+		}
+		discoveredModels.mu.Lock()
+		if baseURL == loadedConfig().BaseURL {
+			discoveredModels.lastError = message
+		}
 		discoveredModels.mu.Unlock()
-		return
+		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": message}})
 	}
-	discoveredModels.ids, discoveredModels.fetchedAt = ids, time.Now()
-	discoveredModels.mu.Unlock()
 }
 
 // discoveredZenModels returns the cached free-tier IDs, refreshing the cache
@@ -1259,41 +1247,13 @@ func discoveredZenModels(cfg pluginConfig) []string {
 	if fresh {
 		return ids
 	}
-	raw, err := credentialHost("host.auth.list", struct{}{})
-	if err != nil {
-		return ids
-	}
-	var listed struct {
-		Files []struct {
-			Provider  string
-			Disabled  bool
-			AuthIndex string `json:"auth_index"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(raw, &listed); err != nil {
-		return ids
-	}
-	for _, file := range listed.Files {
-		if file.Provider != cfg.Provider || file.Disabled {
-			continue
+	if err := refreshModelsFromHost(cfg, "", false); err != nil {
+		discoveredModels.mu.Lock()
+		if cfg.BaseURL == loadedConfig().BaseURL {
+			discoveredModels.lastError = err.Error()
 		}
-		raw, err := credentialHost("host.auth.get", map[string]string{"auth_index": file.AuthIndex})
-		if err != nil {
-			continue
-		}
-		var saved struct {
-			JSON map[string]any `json:"json"`
-		}
-		if err := json.Unmarshal(raw, &saved); err != nil {
-			continue
-		}
-		key := extractAPIKey(saved.JSON)
-		if key == "" {
-			continue
-		}
-		proxyURL, _ := saved.JSON["proxy_url"].(string)
-		refreshDiscoveredModels(cfg.BaseURL, key, proxyURL)
-		break
+		discoveredModels.mu.Unlock()
+		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": err.Error()}})
 	}
 
 	discoveredModels.mu.RLock()
@@ -1314,39 +1274,20 @@ func modelExcluded(cfg pluginConfig, model string) bool {
 
 // modelRegistration announces supported Zen models to CPA.
 // If the user configured custom models in plugins.configs.zen, it announces those;
-// otherwise it announces the default set of Zen free-tier models plus any
-// free-tier models discovered live from the zen /models endpoint.
+// otherwise it announces the supported free models discovered from upstream.
 func modelRegistration() ([]byte, error) {
 	cfg := loadedConfig()
 	declared := cfg.Models
 	if len(declared) == 0 {
-		declared = defaultZenModels
 		for _, id := range discoveredZenModels(cfg) {
 			if modelExcluded(cfg, id) {
 				continue
 			}
-			dup := false
-			for _, m := range declared {
-				if strings.EqualFold(m.Model, id) {
-					dup = true
-					break
-				}
+			endpoint := resolveEndpoint(id)
+			if endpoint == endpointUnsupported {
+				continue
 			}
-			if !dup {
-				// Endpoint is a hint: the official endpoint table when we know
-				// the model, a name-based guess otherwise; execute()/runStream()
-				// retry the dialects anyway. Models on dialects this plugin
-				// cannot speak are not announced at all — selecting them could
-				// never work.
-				if ep, known := officialZenEndpoint(id); known {
-					if ep == endpointUnsupported {
-						continue
-					}
-					declared = append(declared, modelRoute{Model: id, Alias: id, Endpoint: ep})
-					continue
-				}
-				declared = append(declared, modelRoute{Model: id, Alias: id, Endpoint: inferEndpoint(id)})
-			}
+			declared = append(declared, modelRoute{Model: id, Alias: id, Endpoint: endpoint})
 		}
 	}
 	models := make([]modelInfo, 0, len(declared))
@@ -1354,7 +1295,7 @@ func modelRegistration() ([]byte, error) {
 		if m.Model == "" {
 			continue
 		}
-		// configure() and defaultZenModels guarantee Alias is non-empty.
+		// configure() and discovery guarantee Alias is non-empty.
 		alias := m.Alias
 		if cfg.ModelPrefix != "" {
 			alias = cfg.ModelPrefix + "/" + alias

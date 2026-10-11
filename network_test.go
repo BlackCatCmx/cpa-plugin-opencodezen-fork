@@ -82,7 +82,7 @@ func TestIndependentProxiesAndDiscovery(t *testing.T) {
 			if err != nil || status != 200 || !strings.Contains(string(data), "ok") {
 				t.Fatalf("request: %s %d %v", data, status, err)
 			}
-			models, err := fetchZenModels("http://zen.invalid", key, proxy.URL)
+			models, err := fetchZenModels(context.Background(), "", "http://zen.invalid", key, proxy.URL)
 			if err != nil || len(models) != 1 || models[0] != "test-free" {
 				t.Fatalf("discovery: %v %v", models, err)
 			}

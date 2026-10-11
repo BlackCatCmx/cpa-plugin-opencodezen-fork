@@ -14,6 +14,7 @@ import (
 type upstreamError struct {
 	status  int
 	message string
+	raw     string
 }
 
 func (e *upstreamError) Error() string {
@@ -38,15 +39,14 @@ func selectUpstream(ctx context.Context, req executorRequest, cfg pluginConfig, 
 			}
 			return handle, route, nil
 		}
-		chunk, readErr := handle.read()
-		handle.close()
+		data, _, _, readErr := readUpstreamResponse(handle)
 		if readErr != nil {
 			return nil, route, readErr
 		}
 		if isEndpointMismatch(handle.StatusCode) && i+1 < len(endpoints) {
 			continue
 		}
-		return nil, route, &upstreamError{status: handle.StatusCode, message: truncate(chunk.Payload, 512)}
+		return nil, route, &upstreamError{status: handle.StatusCode, message: truncate(data, 512), raw: string(data)}
 	}
 	return nil, route, fmt.Errorf("zen upstream: no endpoint attempted")
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -315,7 +316,7 @@ func TestAuthIdentifierMethod(t *testing.T) {
 	}
 }
 
-func TestModelRegistrationDefaultFallback(t *testing.T) {
+func TestModelRegistrationWithoutDiscoveryIsEmpty(t *testing.T) {
 	resetConfig(t, pluginConfig{Enabled: true, Provider: "zen"})
 	out, err := modelRegistration()
 	if err != nil {
@@ -329,8 +330,8 @@ func TestModelRegistrationDefaultFallback(t *testing.T) {
 	if err := json.Unmarshal(env.Result, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Models) == 0 {
-		t.Fatal("expected default models when none configured")
+	if len(resp.Models) != 0 {
+		t.Fatal("models must come from upstream discovery or explicit configuration")
 	}
 }
 
@@ -1541,7 +1542,7 @@ func TestResponsesToolsToChatStripsNullFields(t *testing.T) {
 	}
 }
 
-func TestFetchZenModelsFiltersFreeTier(t *testing.T) {
+func TestFetchZenModelsPreservesUpstreamList(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			http.NotFound(w, r)
@@ -1553,11 +1554,11 @@ func TestFetchZenModelsFiltersFreeTier(t *testing.T) {
 		fmt.Fprint(w, `{"object":"list","data":[{"id":"mimo-v2.6-flash-free"},{"id":"claude-opus-5"},{"id":"muse-spark-1.3-contributor-free"}]}`)
 	}))
 	defer srv.Close()
-	ids, err := fetchZenModels(srv.URL, "k1", "direct")
+	ids, err := fetchZenModels(context.Background(), "", srv.URL, "k1", "direct")
 	if err != nil {
 		t.Fatalf("fetchZenModels: %v", err)
 	}
-	if len(ids) != 2 || ids[0] != "mimo-v2.6-flash-free" || ids[1] != "muse-spark-1.3-contributor-free" {
+	if len(ids) != 3 || ids[0] != "mimo-v2.6-flash-free" || ids[1] != "claude-opus-5" || ids[2] != "muse-spark-1.3-contributor-free" {
 		t.Fatalf("ids = %v", ids)
 	}
 }
@@ -1597,8 +1598,8 @@ func TestModelRegistrationMergesDiscoveredModels(t *testing.T) {
 	if seen["jev-1.13-free"] {
 		t.Fatalf("unsupported-dialect model announced: %v", seen)
 	}
-	if len(resp.Result.Models) != len(defaultZenModels) {
-		t.Fatalf("model count = %d, want %d (defaults only; mimo is a dup, jev unsupported)", len(resp.Result.Models), len(defaultZenModels))
+	if len(resp.Result.Models) != 1 {
+		t.Fatalf("model count = %d, want %d (discovered supported models only)", len(resp.Result.Models), 1)
 	}
 }
 

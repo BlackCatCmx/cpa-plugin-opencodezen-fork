@@ -5,6 +5,7 @@ let provider = 'zen';
 let globalProxy = '';
 let modelPrefix = 'opencode';
 let baseURL = defaultBase;
+let testModel = '';
 let editing = null;
 let deleting = null;
 let accounts = [];
@@ -71,7 +72,7 @@ async function removeLegacyKey(key) {
 }
 
 async function loadAccounts() {
-  const [config, proxy, result] = await Promise.all([api('/plugins/zen/config'), api('/proxy-url'), api('/auth-files')]);
+  const [config, proxy, result, models] = await Promise.all([api('/plugins/zen/config'), api('/proxy-url'), api('/auth-files'), api('/plugins/zen/models')]);
   const nextProvider = config.provider || 'zen';
   const nextAccounts = await Promise.all(result.files.filter((file) => (file.provider || file.type) === nextProvider && !file.runtime_only).map(async (file) => ({
     ...file,
@@ -84,8 +85,21 @@ async function loadAccounts() {
   baseURL = config['base-url'] || defaultBase;
   $('base-url').value = baseURL;
   accounts = nextAccounts;
+  testModel = config['test-model'] || '';
+  renderModels(models);
   loaded = true;
   renderAccounts();
+}
+
+function renderModels(result) {
+  const select = $('test-model');
+  select.replaceChildren(new Option('请选择测试模型', ''));
+  for (const model of result.models) select.add(new Option(`${model.id}${model.endpoint ? ` (${model.endpoint})` : ''}`, model.id));
+  if (testModel && !result.models.some(model => model.id === testModel)) select.add(new Option(`${testModel}（不在当前列表）`, testModel));
+  select.value = testModel;
+  select.title = select.selectedOptions[0]?.textContent || '';
+  $('pull-models').title = result.error || (result.updated_at && !result.updated_at.startsWith('0001') ? `最近拉取：${result.updated_at}` : '尚未拉取模型');
+  if (result.error) message(`模型拉取失败：${result.error}；已保留已有列表。`, 'error');
 }
 
 async function refreshAfterMutation(success) {
@@ -212,6 +226,8 @@ function renderAccounts() {
 }
 
 async function testAccount(account) {
+  if (!testModel) throw new Error('请先选择测试模型并点击保存。');
+  if ($('test-model').value !== testModel) throw new Error('测试模型已修改，请先点击保存。');
   testResults.set(account.name, { kind: 'secondary', text: '测试中…' });
   renderAccounts();
   try {
@@ -220,7 +236,7 @@ async function testAccount(account) {
     testResults.set(account.name, {
       kind: result.ok ? 'test-success' : 'error-detail',
       text: result.ok ? `成功 · ${result.duration_ms} ms` : `失败 · ${status}${result.error}`,
-      detail: `模型：${result.model}\n${result.reply || result.error || ''}`,
+      detail: `模型：${result.model}\n协议：${result.protocol || '未建立连接'}\n端点：${result.endpoint || ''}\n${result.reply || result.error || ''}${result.raw ? `\n原始响应：\n${result.raw}` : ''}`,
     });
   } catch (error) {
     testResults.set(account.name, { kind: 'error-detail', text: `失败 · ${error.message}` });
@@ -307,9 +323,11 @@ function setControls() {
   $('editor-fields').disabled = pending;
   $('model-prefix').disabled = pending || !loaded;
   $('base-url').disabled = pending || !loaded;
+  $('test-model').disabled = pending || !loaded;
+  $('test-model').title = $('test-model').selectedOptions[0]?.textContent || '';
   $('base-url').title = $('base-url').value;
   $('model-prefix').title = $('model-prefix').value || '无前缀';
-  $('save-settings').disabled = pending || !loaded || ($('model-prefix').value.trim() === modelPrefix && $('base-url').value.trim() === baseURL);
+  $('save-settings').disabled = pending || !loaded || ($('model-prefix').value.trim() === modelPrefix && $('base-url').value.trim() === baseURL && $('test-model').value === testModel);
   updateEditor();
 }
 
@@ -322,12 +340,21 @@ $('settings-form').addEventListener('submit', (event) => {
     let base;
     try { base = new URL($('base-url').value.trim()); } catch { throw new Error('服务地址格式无效。'); }
     if (!['https:', 'http:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || base.href.includes('?') || base.href.includes('#')) throw new Error('服务地址须为 HTTP 或 HTTPS 地址，不能包含用户名、密码、查询参数或片段。');
-    await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({ 'model-prefix': prefix, 'base-url': base.href.replace(/\/+$/, '') }) });
+    await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({ 'model-prefix': prefix, 'base-url': base.href.replace(/\/+$/, ''), 'test-model': $('test-model').value }) });
     await refreshAfterMutation('插件设置已保存。');
   });
 });
 $('model-prefix').addEventListener('input', setControls);
 $('base-url').addEventListener('input', setControls);
+$('test-model').addEventListener('change', setControls);
+$('pull-models').addEventListener('click', () => run(async () => {
+  if ($('base-url').value.trim() !== baseURL) throw new Error('服务地址已修改，请先保存再拉取模型。');
+  const result = await api('/plugins/zen/models/refresh', { method: 'POST' });
+  renderModels(result);
+  try { await api('/plugins/zen/config', { method: 'PATCH', body: JSON.stringify({}) }); }
+  catch (error) { throw new Error(`模型已拉取，但 CPA 更新失败：${error.message}`); }
+  message(`模型信息已更新，当前可选 ${result.models.length} 个模型。选择测试模型后点击上方保存。`);
+}));
 $('key-form').addEventListener('input', updateEditor);
 $('search').addEventListener('input', () => { if (loaded) renderAccounts(); });
 $('status-filter').addEventListener('change', () => { if (loaded) renderAccounts(); });
