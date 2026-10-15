@@ -31,19 +31,29 @@ func trackExecution(payload []byte) ([]byte, error) {
 	}
 	index, _ := req.Metadata["selected_auth_index"].(string)
 	if index == "" {
-		return nil, fmt.Errorf("CPA selected credential index is required")
+		return okEnvelopeJSON(map[string]any{"ClearHeaders": []string{executionHeader}})
 	}
-	raw, err := credentialHost("host.auth.get_runtime", map[string]string{"auth_index": index})
+	raw, err := credentialHost("host.auth.list", struct{}{})
 	if err != nil {
 		return nil, err
 	}
-	var runtime struct {
-		Auth struct{ Provider string } `json:"auth"`
+	var listed struct {
+		Files []struct {
+			AuthIndex string `json:"auth_index"`
+			Provider  string
+		} `json:"files"`
 	}
-	if err := json.Unmarshal(raw, &runtime); err != nil {
+	if err := json.Unmarshal(raw, &listed); err != nil {
 		return nil, err
 	}
-	if runtime.Auth.Provider != loadedConfig().Provider {
+	isZen := false
+	for _, file := range listed.Files {
+		if file.AuthIndex == index && file.Provider == loadedConfig().Provider {
+			isZen = true
+			break
+		}
+	}
+	if !isZen {
 		return okEnvelopeJSON(map[string]any{"ClearHeaders": []string{executionHeader}})
 	}
 	raw, err = credentialHost("host.auth.get", map[string]string{"auth_index": index})

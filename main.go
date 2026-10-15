@@ -281,6 +281,7 @@ func configure(raw []byte) error {
 		discoveredModels.mu.Lock()
 		discoveredModels.ids, discoveredModels.metadata, discoveredModels.fetchedAt = nil, nil, time.Time{}
 		discoveredModels.lastError = ""
+		discoveredModels.attemptedAt, discoveredModels.failures = time.Time{}, 0
 		discoveredModels.mu.Unlock()
 	}
 	return nil
@@ -1146,12 +1147,14 @@ func resolveModelCapabilities(m modelRoute) modelCapabilities {
 
 // Discovery failures preserve the previous cache and expose the error to the panel.
 var discoveredModels struct {
-	mu        sync.RWMutex
-	refreshMu sync.Mutex
-	ids       []string
-	fetchedAt time.Time
-	metadata  map[string]modelMetadata
-	lastError string
+	mu          sync.RWMutex
+	refreshMu   sync.Mutex
+	ids         []string
+	fetchedAt   time.Time
+	attemptedAt time.Time
+	failures    int
+	metadata    map[string]modelMetadata
+	lastError   string
 }
 
 // fetchZenModels reads the upstream list without filtering model IDs.
@@ -1185,39 +1188,20 @@ func fetchZenModels(ctx context.Context, callbackID, baseURL, apiKey, proxyURL s
 
 // refreshDiscoveredModels updates the discovery cache (best effort).
 func refreshDiscoveredModels(baseURL, apiKey, proxyURL string) {
-	err := pullModels(baseURL, apiKey, proxyURL, "", false)
-	if err != nil {
-		message := strings.ReplaceAll(err.Error(), apiKey, "[redacted]")
-		if proxyURL != "" {
-			message = strings.ReplaceAll(message, proxyURL, "[proxy]")
-		}
-		discoveredModels.mu.Lock()
-		if baseURL == loadedConfig().BaseURL {
-			discoveredModels.lastError = message
-		}
-		discoveredModels.mu.Unlock()
-		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": message}})
-	}
+	_ = pullModels(baseURL, apiKey, proxyURL, "", false)
 }
 
 // discoveredZenModels returns the cached free-tier IDs, refreshing the cache
 // synchronously at most once per TTL when a key is known.
 func discoveredZenModels(cfg pluginConfig) []string {
 	discoveredModels.mu.RLock()
-	fresh := time.Since(discoveredModels.fetchedAt) < 10*time.Minute
+	fresh := time.Since(discoveredModels.fetchedAt) < modelRefreshInterval
 	ids := discoveredModels.ids
 	discoveredModels.mu.RUnlock()
 	if fresh {
 		return ids
 	}
-	if err := refreshModelsFromHost(cfg, "", false); err != nil {
-		discoveredModels.mu.Lock()
-		if cfg.BaseURL == loadedConfig().BaseURL {
-			discoveredModels.lastError = err.Error()
-		}
-		discoveredModels.mu.Unlock()
-		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": err.Error()}})
-	}
+	_ = refreshModelsFromHost(cfg, "", false)
 
 	discoveredModels.mu.RLock()
 	defer discoveredModels.mu.RUnlock()

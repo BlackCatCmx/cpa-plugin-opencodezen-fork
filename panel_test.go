@@ -250,6 +250,7 @@ func TestPanelProxyFailure(t *testing.T) {
 }
 
 func TestPluginServiceAddressDiscovery(t *testing.T) {
+	resetDiscoveryCache(t)
 	mockDiscoveryCatalog(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer selected" {
@@ -270,14 +271,9 @@ func TestPluginServiceAddressDiscovery(t *testing.T) {
 	}
 	t.Cleanup(func() { credentialHost = original; storeConfig(defaultPluginConfig()) })
 	discoveredModels.mu.Lock()
-	previousIDs, previousTime := discoveredModels.ids, discoveredModels.fetchedAt
 	discoveredModels.ids, discoveredModels.fetchedAt = []string{"old-free"}, time.Now()
+	discoveredModels.attemptedAt, discoveredModels.failures = time.Now(), maxModelRefreshFailures
 	discoveredModels.mu.Unlock()
-	t.Cleanup(func() {
-		discoveredModels.mu.Lock()
-		discoveredModels.ids, discoveredModels.fetchedAt = previousIDs, previousTime
-		discoveredModels.mu.Unlock()
-	})
 	payload, _ := json.Marshal(map[string]any{"config_yaml": []byte("base-url: " + server.URL + "/v1/\n")})
 	if err := configure(payload); err != nil {
 		t.Fatal(err)

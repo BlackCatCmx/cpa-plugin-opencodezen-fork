@@ -11,8 +11,11 @@ import (
 )
 
 var catalogURL = "https://models.opencode.ai/api.json"
-var endpointDocsURL = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx"
+var endpointDocsURL = "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx"
 var endpointRow = regexp.MustCompile("\\|[^|]+\\|\\s*`?([^|`\\s]+)`?\\s*\\|\\s*`[^`]+/v1/(chat/completions|responses|messages|systemone)`")
+
+const modelRefreshInterval = 10 * time.Minute
+const maxModelRefreshFailures = 3
 
 type catalogModel struct {
 	ID       string `json:"id"`
@@ -128,14 +131,60 @@ func fetchCatalog(ctx context.Context, callbackID, proxy string) (map[string]mod
 }
 
 func pullModels(baseURL, key, proxy, callbackID string, force bool) error {
+	return refreshModelCache(baseURL, force, func() error {
+		return fetchDiscoveredModels(baseURL, key, proxy, callbackID)
+	})
+}
+
+// All discovery entry points share the interval and consecutive failure limit.
+func refreshModelCache(baseURL string, force bool, fetch func() error) error {
 	discoveredModels.refreshMu.Lock()
 	defer discoveredModels.refreshMu.Unlock()
 	discoveredModels.mu.RLock()
-	fresh := time.Since(discoveredModels.fetchedAt) < 10*time.Minute
+	skip := time.Since(discoveredModels.fetchedAt) < modelRefreshInterval ||
+		time.Since(discoveredModels.attemptedAt) < modelRefreshInterval ||
+		discoveredModels.failures >= maxModelRefreshFailures
 	discoveredModels.mu.RUnlock()
-	if !force && fresh && baseURL == loadedConfig().BaseURL {
+	if baseURL != loadedConfig().BaseURL {
+		return fmt.Errorf("服务地址已修改，请重新拉取")
+	}
+	if !force && skip {
 		return nil
 	}
+	err := fetch()
+	discoveredModels.mu.Lock()
+	if baseURL != loadedConfig().BaseURL {
+		discoveredModels.mu.Unlock()
+		return fmt.Errorf("服务地址已修改，请重新拉取")
+	}
+	discoveredModels.attemptedAt = time.Now()
+	if err == nil {
+		discoveredModels.failures = 0
+		discoveredModels.lastError = ""
+	} else {
+		discoveredModels.failures++
+		if discoveredModels.failures >= maxModelRefreshFailures {
+			err = fmt.Errorf("%w；自动拉取已暂停，请手动拉取重试", err)
+		}
+		discoveredModels.lastError = err.Error()
+	}
+	discoveredModels.mu.Unlock()
+	if err != nil {
+		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "Zen model discovery failed", "fields": map[string]string{"error": err.Error()}})
+	}
+	return err
+}
+
+func fetchDiscoveredModels(baseURL, key, proxy, callbackID string) (err error) {
+	defer func() {
+		if err != nil {
+			message := strings.ReplaceAll(err.Error(), key, "[redacted]")
+			if proxy != "" {
+				message = strings.ReplaceAll(message, proxy, "[proxy]")
+			}
+			err = fmt.Errorf("%s", message)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	upstreamIDs, err := fetchZenModels(ctx, callbackID, baseURL, key, proxy)
@@ -161,11 +210,16 @@ func pullModels(baseURL, key, proxy, callbackID string, force bool) error {
 		return fmt.Errorf("服务地址已修改，请重新拉取")
 	}
 	discoveredModels.ids, discoveredModels.metadata, discoveredModels.fetchedAt = ids, metadata, time.Now()
-	discoveredModels.lastError = ""
 	return nil
 }
 
 func refreshModelsFromHost(cfg pluginConfig, callbackID string, force bool) error {
+	return refreshModelCache(cfg.BaseURL, force, func() error {
+		return pullModelsFromHost(cfg, callbackID)
+	})
+}
+
+func pullModelsFromHost(cfg pluginConfig, callbackID string) error {
 	raw, err := credentialHost("host.auth.list", struct{}{})
 	if err != nil {
 		return fmt.Errorf("读取模型拉取凭据失败: %w", err)
@@ -199,20 +253,7 @@ func refreshModelsFromHost(cfg pluginConfig, callbackID string, force bool) erro
 			continue
 		}
 		proxy, _ := saved.JSON["proxy_url"].(string)
-		err = pullModels(cfg.BaseURL, key, proxy, callbackID, force)
-		if err != nil {
-			message := strings.ReplaceAll(err.Error(), key, "[redacted]")
-			if proxy != "" {
-				message = strings.ReplaceAll(message, proxy, "[proxy]")
-			}
-			discoveredModels.mu.Lock()
-			if cfg.BaseURL == loadedConfig().BaseURL {
-				discoveredModels.lastError = message
-			}
-			discoveredModels.mu.Unlock()
-			return fmt.Errorf("%s", message)
-		}
-		return nil
+		return fetchDiscoveredModels(cfg.BaseURL, key, proxy, callbackID)
 	}
 	return fmt.Errorf("请先添加并启用一把 Zen Key，再拉取模型")
 }

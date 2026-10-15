@@ -26,6 +26,8 @@ func mockSelectedCredential(t *testing.T, provider, proxy string) {
 	original := credentialHost
 	credentialHost = func(method string, payload any) (json.RawMessage, error) {
 		switch method {
+		case "host.auth.list":
+			return json.RawMessage(fmt.Sprintf(`{"files":[{"auth_index":"test","provider":%q},{"auth_index":"selected","provider":%q}]}`, provider, provider)), nil
 		case "host.auth.get_runtime":
 			return json.RawMessage(fmt.Sprintf(`{"auth":{"provider":%q}}`, provider)), nil
 		case "host.auth.get":
@@ -289,6 +291,29 @@ func TestExecutionTrackingOnlyForZenLocalHTTP(t *testing.T) {
 				}
 			} else if count != 0 || len(response.Headers) != 0 || len(response.ClearHeaders) != 1 {
 				t.Fatalf("unexpected tracking: %s", raw)
+			}
+		})
+	}
+}
+
+func TestExecutionTrackingSkipsCredentialsOutsideHostFileList(t *testing.T) {
+	for _, payload := range []string{
+		`{"RequestID":"other-channel","Metadata":{"selected_auth_index":"config-key"}}`,
+		`{"RequestID":"without-credential","Metadata":{}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			original := credentialHost
+			credentialHost = func(method string, _ any) (json.RawMessage, error) {
+				if method != "host.auth.list" {
+					t.Errorf("unexpected credential lookup: %s", method)
+					return nil, fmt.Errorf("auth runtime info not found")
+				}
+				return json.RawMessage(`{"files":[{"auth_index":"zen-key","provider":"zen"}]}`), nil
+			}
+			t.Cleanup(func() { credentialHost = original })
+			raw, err := trackExecution([]byte(payload))
+			if err != nil || !strings.Contains(string(raw), `"ClearHeaders":["`+executionHeader+`"]`) {
+				t.Fatalf("response=%s, error=%v", raw, err)
 			}
 		})
 	}
